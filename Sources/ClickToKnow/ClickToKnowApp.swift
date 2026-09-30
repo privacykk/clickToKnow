@@ -5,6 +5,7 @@ import AppKit
 struct ClickToKnowApp {
     @MainActor
     static func main() {
+        EnvLoader.load() // 先加载 .env，让密钥可用
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate

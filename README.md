@@ -20,15 +20,18 @@ swift run
 
 ## 配置
 
-### API Key（环境变量注入）
+### API Key（`.env` 文件注入）
 
-密钥通过环境变量 `CLICKTOKNOW_API_KEY` 注入，避免写进代码/仓库：
+密钥从以下来源读取，优先级从高到低：环境变量 → 当前目录 `.env` → `~/.clicktoknow/.env`。
+
+推荐用 `.env` 文件（`.env` 已被 git 忽略，不会提交）：
 
 ```bash
-export CLICKTOKNOW_API_KEY="sk-..."
+cp .env.example .env
+# 编辑 .env，填入 CLICKTOKNOW_API_KEY=sk-...
 ```
 
-（可写入 `~/.zshrc` 持久化；留空则用 macOS 系统词典兜底。）
+> 注意：打包成 `.app` 从 Finder 双击启动时，进程**不继承 shell 环境变量**，且工作目录不是项目根，会读不到项目根 `.env`。此时可改用 `~/.clicktoknow/.env`（Home 目录下，打包后仍可定位），或在设置窗口手动填 Key（写 UserDefaults），或后续迁移到钥匙串。
 
 ### Base URL / Model
 
@@ -38,8 +41,6 @@ export CLICKTOKNOW_API_KEY="sk-..."
 |---|---|
 | Base URL | `https://api.deepseek.com` |
 | Model | `deepseek-flash` |
-
-> 注意：打包成 `.app` 后从 Finder 双击启动，进程不继承 shell 环境变量，`CLICKTOKNOW_API_KEY` 会读不到。此时可在设置窗口手动填入 Key（写 UserDefaults），或依赖 `launchctl setenv`。
 
 ## 架构
 
