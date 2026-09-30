@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Swift 构建产物
+.build/
+.swiftpm/
+DerivedData/
+
+# Xcode
+*.xcodeproj
+xcuserdata/
+
+# 环境变量（本地密钥，勿提交）
+.env
+
+# Claude 本地会话配置（权限白名单等）
+.claude/settings.local.json
+
+# 与项目无关的本地目录
+AgenticMetaEngineering-main/
