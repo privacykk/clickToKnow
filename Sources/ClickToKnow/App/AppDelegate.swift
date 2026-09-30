@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover = ResultPopover()
         setupSelectionMonitor()
         requestAccessibilityIfNeeded()
+        NSLog("[ClickToKnow] LLM 配置：%@", AppConfig.shared.hasLLMConfig ? "已就绪" : "未配置（回落到系统词典）")
     }
 
     private func setupSelectionMonitor() {
