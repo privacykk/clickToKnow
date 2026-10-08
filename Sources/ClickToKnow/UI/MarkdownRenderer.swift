@@ -5,7 +5,7 @@ enum MarkdownRenderer {
     static func render(_ markdown: String) -> NSAttributedString {
         let base = NSFont.systemFont(ofSize: 14)
         let bold = NSFont.boldSystemFont(ofSize: 14)
-        let color = NSColor.labelColor
+        let color = NSColor(calibratedWhite: 0.12, alpha: 1.0) // 固定深色字，避免深色模式下 labelColor 变白
         let output = NSMutableAttributedString()
 
         for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {

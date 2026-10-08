@@ -51,9 +51,9 @@ final class ResultPopover {
         container = NSView()
         container.wantsLayer = true
         container.layer?.cornerRadius = 12
-        container.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+        container.layer?.backgroundColor = NSColor(calibratedWhite: 0.99, alpha: 1.0).cgColor // 固定浅底
         container.layer?.borderWidth = 0.5
-        container.layer?.borderColor = NSColor.separatorColor.cgColor
+        container.layer?.borderColor = NSColor(calibratedWhite: 0.85, alpha: 1.0).cgColor
         container.addSubview(scrollView)
         panel.contentView = container
     }
