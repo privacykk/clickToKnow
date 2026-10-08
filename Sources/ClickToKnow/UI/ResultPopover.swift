@@ -10,13 +10,13 @@ final class ResultPopover {
     private var dismissMonitor: Any?
     private var autoCloseItem: DispatchWorkItem?
 
-    private static let maxWidth: CGFloat = 420
-    private static let maxContentHeight: CGFloat = 340
-    private static let padding: CGFloat = 14
+    private static let maxWidth: CGFloat = 560
+    private static let maxContentHeight: CGFloat = 500
+    private static let padding: CGFloat = 16
 
     init() {
         panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: Self.maxWidth, height: 120),
+            contentRect: NSRect(x: 0, y: 0, width: Self.maxWidth, height: 200),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -41,8 +41,10 @@ final class ResultPopover {
         textView.drawsBackground = false
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
-        textView.textContainerInset = NSSize(width: 0, height: 4)
-        textView.textContainer?.widthTracksTextView = true
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 0
+        // 关键：手动用 containerSize 控制换行宽度，而不是被 textView.frame 覆盖
+        textView.textContainer?.widthTracksTextView = false
 
         scrollView.documentView = textView
 
@@ -52,8 +54,6 @@ final class ResultPopover {
         container.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
         container.layer?.borderWidth = 0.5
         container.layer?.borderColor = NSColor.separatorColor.cgColor
-
-        // 关键：把 scrollView 放进容器视图树，否则不显示
         container.addSubview(scrollView)
         panel.contentView = container
     }
@@ -62,29 +62,23 @@ final class ResultPopover {
         let pad = Self.padding
         let textWidth = Self.maxWidth - pad * 2
 
-        // 先按最大宽度排版，得到文本实际占用的宽高
+        // 按固定宽度排版，测得完整文本高度
         textView.textContainer?.containerSize = NSSize(width: textWidth, height: .greatestFiniteMagnitude)
         textView.textStorage?.setAttributedString(attributed)
         textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+        let used = textView.layoutManager!.usedRect(for: textView.textContainer!)
 
-        let used = textView.layoutManager?.usedRect(for: textView.textContainer!) ?? .zero
-
-        // 内容宽高：宽按实际（短文本不撑满），高为完整文本高度 + clamp 到一个上限
-        let contentWidth = min(max(used.width + 4, 160), textWidth)
-        let fullTextHeight = max(used.height + 4, 24)
+        let fullTextHeight = max(ceil(used.height) + 2, 40)
         let visibleHeight = min(fullTextHeight, Self.maxContentHeight)
 
-        let width = contentWidth + pad * 2
+        // textView = 完整内容尺寸（超出可视区由 scrollView 滚动）
+        textView.frame = NSRect(x: 0, y: 0, width: textWidth, height: fullTextHeight)
+
+        // scrollView 占据可视区域
+        scrollView.frame = NSRect(x: pad, y: pad, width: textWidth, height: visibleHeight)
+
+        let width = textWidth + pad * 2
         let height = visibleHeight + pad * 2
-
-        // textView 高度设为完整文本高度（超过可视区由 scrollView 滚动）
-        textView.textContainer?.containerSize = NSSize(width: contentWidth, height: .greatestFiniteMagnitude)
-        textView.frame = NSRect(x: 0, y: 0, width: contentWidth, height: fullTextHeight)
-        textView.minSize = NSSize(width: 0, height: 0)
-        textView.maxSize = NSSize(width: contentWidth, height: .greatestFiniteMagnitude)
-
-        // scrollView 占据容器可视区域
-        scrollView.frame = NSRect(x: pad, y: pad, width: width - pad * 2, height: height - pad * 2)
 
         // 定位到鼠标附近并 clamp 进屏幕
         let visible = Self.screen(for: mouse)?.visibleFrame
