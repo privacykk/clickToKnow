@@ -1,14 +1,17 @@
 import AppKit
 
-/// 就地悬浮展示释义的无边框面板：不抢焦点、浮于其它窗口之上、点击外部/超时自动关闭。
+/// 就地悬浮展示释义的无边框面板：不抢焦点、浮于其它窗口之上、点击外部/超时自动关闭，
+/// 鼠标悬停期间暂停倒计时（避免长内容读到一半被打断）。
 @MainActor
 final class ResultPopover {
     private let panel: NSPanel
-    private let container: NSView
+    private let container: HoverDetectingView
     private let scrollView: NSScrollView
     private let textView: NSTextView
     private var dismissMonitor: Any?
     private var autoCloseItem: DispatchWorkItem?
+
+    private var autoCloseDuration: TimeInterval = 15
 
     private static let maxWidth: CGFloat = 560
     private static let maxContentHeight: CGFloat = 500
@@ -48,17 +51,22 @@ final class ResultPopover {
 
         scrollView.documentView = textView
 
-        container = NSView()
+        container = HoverDetectingView()
         container.wantsLayer = true
         container.layer?.cornerRadius = 12
         container.layer?.backgroundColor = NSColor(calibratedWhite: 0.99, alpha: 1.0).cgColor // 固定浅底
         container.layer?.borderWidth = 0.5
         container.layer?.borderColor = NSColor(calibratedWhite: 0.85, alpha: 1.0).cgColor
+        container.onHover = { [weak self] hovering in
+            self?.hoverChanged(hovering)
+        }
         container.addSubview(scrollView)
         panel.contentView = container
     }
 
-    func show(_ attributed: NSAttributedString, at mouse: NSPoint) {
+    func show(_ attributed: NSAttributedString, at mouse: NSPoint, autoCloseAfter: TimeInterval = 15) {
+        autoCloseDuration = autoCloseAfter
+
         let pad = Self.padding
         let textWidth = Self.maxWidth - pad * 2
 
@@ -103,6 +111,16 @@ final class ResultPopover {
         panel.orderOut(nil)
     }
 
+    /// 悬停期间冻结自动关闭倒计时，移开后重新计时
+    private func hoverChanged(_ hovering: Bool) {
+        if hovering {
+            autoCloseItem?.cancel()
+            autoCloseItem = nil
+        } else {
+            scheduleAutoClose()
+        }
+    }
+
     private static func screen(for point: NSPoint) -> NSScreen? {
         NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) } ?? NSScreen.main
     }
@@ -113,7 +131,7 @@ final class ResultPopover {
             self?.close()
         }
         autoCloseItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + autoCloseDuration, execute: item)
     }
 
     private func addDismissMonitor() {
@@ -135,5 +153,34 @@ final class ResultPopover {
             NSEvent.removeMonitor(monitor)
             dismissMonitor = nil
         }
+    }
+}
+
+/// 能感知鼠标进出的容器视图（用于悬停暂停倒计时）
+private final class HoverDetectingView: NSView {
+    var onHover: ((Bool) -> Void)?
+    private var trackingArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let area = trackingArea {
+            removeTrackingArea(area)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHover?(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHover?(false)
     }
 }

@@ -12,9 +12,18 @@ final class OpenAICompatProvider: InterpretationProvider {
     private let config: Config
     private let session: URLSession
 
-    init(config: Config, session: URLSession = .shared) {
+    init(config: Config, session: URLSession = OpenAICompatProvider.makeSession()) {
         self.config = config
         self.session = session
+    }
+
+    /// 自建 session 而非复用 URLSession.shared：shared 默认超时 60s，
+    /// 卡住时悬浮窗会长时间无响应；这里把请求超时压到 20s。
+    private static func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 45
+        return URLSession(configuration: configuration)
     }
 
     func interpret(_ text: String) async throws -> Interpretation {
@@ -37,25 +46,68 @@ final class OpenAICompatProvider: InterpretationProvider {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw InterpretationError.badResponse
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch let urlError as URLError {
+            throw InterpretationError.server(Self.networkHint(urlError))
         }
 
-        let decoded = try JSONDecoder().decode(ChatResponse.self, from: data)
-        guard let content = decoded.choices.first?.message.content, !content.isEmpty else {
+        guard let http = response as? HTTPURLResponse else {
+            throw InterpretationError.badResponse
+        }
+        guard (200...299).contains(http.statusCode) else {
+            // 保留响应体片段：401/402 等的 code、message 字段是定位问题的关键
+            let snippet = String(decoding: data.prefix(240), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw InterpretationError.server("HTTP \(http.statusCode) \(snippet)")
+        }
+
+        let decoded: ChatResponse
+        do {
+            decoded = try JSONDecoder().decode(ChatResponse.self, from: data)
+        } catch {
+            throw InterpretationError.badResponse
+        }
+        guard let raw = decoded.choices.first?.message.content, !raw.isEmpty else {
             throw InterpretationError.badResponse
         }
         return Interpretation(
             term: text,
-            content: content.trimmingCharacters(in: .whitespacesAndNewlines),
+            content: Self.stripCodeFence(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
             source: .llm
         )
     }
 
     private var chatCompletionsURL: URL? {
         let base = config.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard base.hasPrefix("http://") || base.hasPrefix("https://") else { return nil }
         return URL(string: base + "/chat/completions")
+    }
+
+    /// 把 URLError 翻译成人能看懂的话。
+    private static func networkHint(_ error: URLError) -> String {
+        switch error.code {
+        case .timedOut: return "请求超时（20s），请检查网络或稍后重试"
+        case .cannotFindHost: return "找不到主机，请检查 Base URL"
+        case .cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet:
+            return "无法连接服务，请检查网络或 Base URL"
+        default: return error.localizedDescription
+        }
+    }
+
+    /// 兜底：模型偶尔无视指令仍包一层 ```markdown 围栏，剥掉以免显示噪音。
+    private static func stripCodeFence(_ text: String) -> String {
+        guard text.hasPrefix("```") else { return text }
+        var result = text.dropFirst(3)
+        if let newline = result.firstIndex(of: "\n") {
+            result = result[result.index(after: newline)...]
+        }
+        if result.hasSuffix("```") {
+            result = result.dropLast(3)
+        }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private struct ChatResponse: Decodable {
@@ -74,6 +126,6 @@ final class OpenAICompatProvider: InterpretationProvider {
     - **含义**：（优先给领域术语义，而非字面义；例如 helm 在容器语境是 Kubernetes 的包管理器，不是"舵"）
     - **一句话解释**：…
     - **相关术语**：0-2 个
-    直接回答，不要寒暄，不要重复用户输入。
+    控制在 150 字以内，直接回答，不要寒暄，不要重复用户输入，不要用代码围栏包裹。
     """
 }

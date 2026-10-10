@@ -9,6 +9,10 @@ final class SelectionMonitor {
     private let clipboard = ClipboardManager()
     private let onSelected: (String, NSPoint) -> Void
 
+    /// 抓取进行中标志。防止快速连按：第二次 saveSnapshot 会把第一次刚复制的
+    /// 选词当作"原始剪贴板"备份，导致恢复后用户剪贴板被污染成错误内容。
+    private var isProcessing = false
+
     init(onSelected: @escaping (String, NSPoint) -> Void) {
         self.onSelected = onSelected
     }
@@ -29,6 +33,8 @@ final class SelectionMonitor {
     }
 
     private func handleHotKey() {
+        guard !isProcessing else { return }
+        isProcessing = true
         let mouse = NSEvent.mouseLocation
         let initialCount = clipboard.saveSnapshot()
         simulateCopy()
@@ -41,6 +47,7 @@ final class SelectionMonitor {
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let readCount = clipboard.changeCount
             clipboard.restoreSnapshot(readChangeCount: readCount)
+            finish()
             guard !text.isEmpty else {
                 NSLog("[ClickToKnow] 未抓取到文本（空选择）")
                 return
@@ -52,8 +59,13 @@ final class SelectionMonitor {
             }
         } else {
             clipboard.restoreSnapshot(readChangeCount: clipboard.changeCount)
+            finish()
             NSLog("[ClickToKnow] 未抓取到文本（超时，请确认已选中文字并授予辅助功能权限）")
         }
+    }
+
+    private func finish() {
+        isProcessing = false
     }
 
     /// 向前台应用发送 ⌘C（需辅助功能权限，否则静默失败）。

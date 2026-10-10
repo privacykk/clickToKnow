@@ -13,6 +13,18 @@ final class SystemDictionaryProvider: InterpretationProvider {
         guard let definition, !definition.isEmpty else {
             throw InterpretationError.notFound
         }
-        return Interpretation(term: text, content: definition, source: .systemDictionary)
+        return Interpretation(
+            term: text,
+            content: Self.beautify(definition),
+            source: .systemDictionary
+        )
+    }
+
+    /// 系统词典返回的是挤成一行的紧凑文本（`词 | 音标 | 释义①… ▸ 例句`），
+    /// 按分隔符换行以提升可读性。
+    private static func beautify(_ raw: String) -> String {
+        var text = raw.replacingOccurrences(of: " | ", with: "\n| ")
+        text = text.replacingOccurrences(of: " ▸ ", with: "\n  ▸ ")
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
