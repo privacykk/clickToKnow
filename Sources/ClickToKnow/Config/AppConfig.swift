@@ -40,6 +40,11 @@ final class AppConfig {
         set { defaults.set(newValue, forKey: Key.model) }
     }
 
+    /// 密钥是否由环境变量/.env 提供（true 时设置窗口无需回显，保存留空也不会禁用 LLM）
+    var apiKeyFromEnvironment: Bool {
+        !(ProcessInfo.processInfo.environment["CLICKTOKNOW_API_KEY"] ?? "").isEmpty
+    }
+
     var hasLLMConfig: Bool {
         !apiKey.isEmpty && !baseURL.isEmpty && !model.isEmpty
     }
