@@ -1,41 +1,130 @@
 import AppKit
 import Carbon.HIToolbox
 
+/// 抓取失败的分类：AppDelegate 据此给出可操作的弹窗提示，不再静默写日志
+enum SelectionFailure {
+    /// 未授予辅助功能权限（模拟 ⌘C 被系统拦截，必然抓不到）
+    case noAccessibilityPermission
+    /// 系统处于安全输入态（密码框等），为保护隐私主动跳过
+    case secureInputActive
+    /// 前台应用在黑名单中（密码/密钥管理类），永不抓取
+    case blacklistedApp
+    /// 复制成功但内容为空（空选择）
+    case emptySelection
+    /// 500ms 内剪贴板无变化（应用复制响应慢或禁止复制）
+    case timeout
+}
+
 /// 监听全局快捷键，抓取前台应用当前选中的文本。
-/// 流程：记录鼠标位置 → 保存剪贴板快照 → 模拟 ⌘C → 轮询 changeCount → 读剪贴板 → 条件恢复 → 回调(文本, 位置)。
+/// 主路径：AX 直读（不碰剪贴板，顺带选区矩形与前后文）；
+/// 兜底：保存剪贴板快照 → 模拟 ⌘C → 轮询 changeCount → 读剪贴板 → 条件恢复。
 @MainActor
 final class SelectionMonitor {
     private let hotKey = GlobalHotKey()
     private let clipboard = ClipboardManager()
-    private let onSelected: (String, NSPoint) -> Void
+    /// 回调参数：选中文本、弹窗锚点（AX 路径为选区左上角，⌘C 兜底为鼠标位置）、选区前后文（⌘C 路径为 nil）
+    private let onSelected: (String, NSPoint, String?) -> Void
+    private let onFailure: (SelectionFailure, NSPoint) -> Void
+
+    /// 当前生效绑定：注册失败时的回滚基准，也是状态页展示的数据源
+    private(set) var currentBinding: HotKeyBinding = CarbonKeyTranslator.defaultBinding
+
+    /// 暂停取词（投屏/演示/输密码场景）：注销热键但保留绑定，恢复时原样注册回来
+    private(set) var isPaused = false
 
     /// 抓取进行中标志。防止快速连按：第二次 saveSnapshot 会把第一次刚复制的
     /// 选词当作"原始剪贴板"备份，导致恢复后用户剪贴板被污染成错误内容。
     private var isProcessing = false
 
-    init(onSelected: @escaping (String, NSPoint) -> Void) {
+    var isHotKeyRegistered: Bool { hotKey.isRegistered }
+
+    init(
+        onSelected: @escaping (String, NSPoint, String?) -> Void,
+        onFailure: @escaping (SelectionFailure, NSPoint) -> Void = { _, _ in }
+    ) {
         self.onSelected = onSelected
+        self.onFailure = onFailure
     }
 
     func start() {
-        // 默认 ⌥⌘K（⌥⌘D 与系统「显示/隐藏 Dock」冲突）
-        let ok = hotKey.register(
-            keyCode: UInt32(kVK_ANSI_K),
-            modifiers: UInt32(cmdKey | optionKey)
+        // 绑定来自配置（默认 ⌥⌘K，⌥⌘D 与系统「显示/隐藏 Dock」冲突）
+        reloadHotKey(with: AppConfig.shared.hotKeyBinding)
+    }
+
+    /// 试注册新绑定：成功则更新 currentBinding；失败自动恢复原绑定并返回 false。
+    /// 调用方（快捷键设置页）只有在返回 true 后才应持久化配置，保证任何时刻热键可用。
+    @discardableResult
+    func reloadHotKey(with binding: HotKeyBinding) -> Bool {
+        if register(binding) {
+            currentBinding = binding
+            // 暂停期间改键：试注册验证冲突后立即注销，保持暂停语义
+            if isPaused { hotKey.unregister() }
+            Log.selection.info("快捷键 \(binding.displayString) 已注册：选中文字后按下即可抓取")
+            return true
+        }
+        Log.selection.warning("快捷键 \(binding.displayString) 注册失败，回滚原绑定 \(self.currentBinding.displayString)")
+        // 回滚原绑定；若原绑定也注册不上（极端场景）则保持未注册，状态页会显示红点
+        _ = register(currentBinding)
+        if isPaused { hotKey.unregister() }
+        return false
+    }
+
+    private func register(_ binding: HotKeyBinding) -> Bool {
+        hotKey.register(
+            keyCode: binding.keyCode,
+            modifiers: binding.carbonModifiers
         ) { [weak self] in
             self?.handleHotKey()
         }
-        if ok {
-            NSLog("[ClickToKnow] 快捷键 ⌥⌘K 已注册：选中文字后按下即可抓取")
+    }
+
+    /// 暂停/恢复取词：暂停时注销热键（状态页显示「已暂停」而非注册失败），恢复时按当前绑定重新注册
+    func setPaused(_ paused: Bool) {
+        guard paused != isPaused else { return }
+        isPaused = paused
+        if paused {
+            hotKey.unregister()
+            Log.selection.info("取词已暂停")
         } else {
-            NSLog("[ClickToKnow] 全局快捷键 ⌥⌘K 注册失败")
+            _ = register(currentBinding)
+            Log.selection.info("取词已恢复")
         }
     }
 
     private func handleHotKey() {
         guard !isProcessing else { return }
-        isProcessing = true
         let mouse = NSEvent.mouseLocation
+
+        // 前置检查：无权限时抓取必然失败，与其让用户干等，不如立刻说明原因
+        guard AXIsProcessTrusted() else {
+            Log.selection.warning("未授予辅助功能权限，跳过抓取")
+            onFailure(.noAccessibilityPermission, mouse)
+            return
+        }
+        // 安全输入态（密码框聚焦等）：不抓取、不复制，保护隐私
+        if IsSecureEventInputEnabled() {
+            Log.selection.info("系统处于安全输入态，跳过抓取")
+            onFailure(.secureInputActive, mouse)
+            return
+        }
+        // 应用黑名单：密码/密钥管理类应用永不抓取
+        if let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+           AppConfig.shared.blacklistedBundleIDs.contains(bundleID) {
+            Log.selection.info("前台应用 \(bundleID) 在黑名单中，跳过抓取")
+            onFailure(.blacklistedApp, mouse)
+            return
+        }
+
+        // 主路径：AX 直读。典型 <20ms；最坏情况（目标应用 IPC 挂起）主线程阻塞 0.4s 超时上限
+        if let selection = AXSelectionReader.read() {
+            let anchor = selection.rect.map { NSPoint(x: $0.minX, y: $0.maxY) } ?? mouse
+            Log.selection.debug("AX 直读成功：\(selection.text.count) 字符")
+            onSelected(selection.text, anchor, selection.context)
+            return
+        }
+
+        // 兜底：模拟 ⌘C（目标应用未实现 AX 时）
+        isProcessing = true
         let initialCount = clipboard.saveSnapshot()
         simulateCopy()
         pollRead(initialCount: initialCount, deadline: Date().addingTimeInterval(0.5), mouse: mouse)
@@ -49,10 +138,11 @@ final class SelectionMonitor {
             clipboard.restoreSnapshot(readChangeCount: readCount)
             finish()
             guard !text.isEmpty else {
-                NSLog("[ClickToKnow] 未抓取到文本（空选择）")
+                Log.selection.debug("未抓取到文本（空选择）")
+                onFailure(.emptySelection, mouse)
                 return
             }
-            onSelected(text, mouse)
+            onSelected(text, mouse, nil) // ⌘C 兜底路径拿不到选区前后文
         } else if Date() < deadline {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
                 self?.pollRead(initialCount: initialCount, deadline: deadline, mouse: mouse)
@@ -60,7 +150,8 @@ final class SelectionMonitor {
         } else {
             clipboard.restoreSnapshot(readChangeCount: clipboard.changeCount)
             finish()
-            NSLog("[ClickToKnow] 未抓取到文本（超时，请确认已选中文字并授予辅助功能权限）")
+            Log.selection.debug("未抓取到文本（超时，应用复制响应慢或禁止复制）")
+            onFailure(.timeout, mouse)
         }
     }
 

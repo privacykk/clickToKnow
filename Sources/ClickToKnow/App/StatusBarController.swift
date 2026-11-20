@@ -1,12 +1,26 @@
 import AppKit
+import ServiceManagement
 
-/// 菜单栏图标与菜单（快捷键提示 / 权限引导 / 设置 / 退出）。
+/// 菜单栏图标与菜单：快捷键与权限状态在菜单展开时实时刷新，暂停取词 / 开机自启开关，设置入口与退出。
 @MainActor
-final class StatusBarController: NSObject {
+final class StatusBarController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
+    private let statusModel: AppStatusModel
     private var settingsWindowController: SettingsWindowController?
 
-    override init() {
+    /// 动态条目：menuWillOpen 时先拉最新状态再回填 title
+    private let hotkeyItem = NSMenuItem(title: "快捷键", action: nil, keyEquivalent: "")
+    private let permissionItem = NSMenuItem(title: "辅助功能权限", action: nil, keyEquivalent: "")
+    private let pauseItem = NSMenuItem(title: "暂停取词", action: nil, keyEquivalent: "")
+    private let loginItem = NSMenuItem(title: "开机自启", action: nil, keyEquivalent: "")
+    private let historyItem = NSMenuItem(title: "历史记录…", action: nil, keyEquivalent: "")
+    private var historyWindowController: HistoryWindowController?
+
+    /// 「暂停取词」开关回调：AppDelegate 注入，转发给 SelectionMonitor（勾选态来自 statusModel.hotKeyPaused）
+    var onTogglePause: ((Bool) -> Void)?
+
+    init(statusModel: AppStatusModel) {
+        self.statusModel = statusModel
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
         setupMenu()
@@ -24,21 +38,27 @@ final class StatusBarController: NSObject {
         }
 
         let menu = NSMenu()
+        menu.delegate = self
 
-        let hotkeyItem = NSMenuItem(
-            title: "快捷键：⌥⌘K（先选中文字）",
-            action: nil,
-            keyEquivalent: ""
-        )
         menu.addItem(hotkeyItem)
 
-        let permissionItem = NSMenuItem(
-            title: "辅助功能权限…",
-            action: #selector(openAccessibilitySettings(_:)),
-            keyEquivalent: ""
-        )
         permissionItem.target = self
+        permissionItem.action = #selector(openAccessibilitySettings(_:))
         menu.addItem(permissionItem)
+
+        pauseItem.target = self
+        pauseItem.action = #selector(togglePause(_:))
+        menu.addItem(pauseItem)
+
+        loginItem.target = self
+        loginItem.action = #selector(toggleLoginItem(_:))
+        menu.addItem(loginItem)
+
+        menu.addItem(.separator())
+
+        historyItem.target = self
+        historyItem.action = #selector(openHistory(_:))
+        menu.addItem(historyItem)
 
         menu.addItem(.separator())
 
@@ -61,11 +81,34 @@ final class StatusBarController: NSObject {
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+        refreshDynamicItems() // 首次展开前也有正确内容
     }
 
-    @objc private func openSettings(_ sender: Any?) {
+    // MARK: - NSMenuDelegate
+
+    func menuWillOpen(_ menu: NSMenu) {
+        refreshDynamicItems()
+    }
+
+    private func refreshDynamicItems() {
+        statusModel.refresh()
+        hotkeyItem.title = "快捷键：\(statusModel.hotKeyBinding.displayString)（先选中文字）"
+        permissionItem.title = statusModel.accessibilityGranted
+            ? "辅助功能权限：已授权 ✓"
+            : "辅助功能权限：未授权 — 去授权"
+        pauseItem.state = statusModel.hotKeyPaused ? .on : .off
+        loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+    }
+
+    /// 设置窗口当前是否可见：Dock 唤起判断用，避免把划词结果 NSPanel 误当作用户可见主界面
+    var isSettingsWindowVisible: Bool {
+        settingsWindowController?.window?.isVisible == true
+    }
+
+    /// 打开设置与状态中心（菜单「设置…」与启动时自动展示共用）
+    @objc func openSettings(_ sender: Any? = nil) {
         if settingsWindowController == nil {
-            settingsWindowController = SettingsWindowController()
+            settingsWindowController = SettingsWindowController(statusModel: statusModel)
         }
         settingsWindowController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -73,7 +116,37 @@ final class StatusBarController: NSObject {
 
     /// 直达系统设置的辅助功能面板（选词靠模拟 ⌘C，未授权则抓不到文本）
     @objc private func openAccessibilitySettings(_ sender: Any?) {
-        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-        NSWorkspace.shared.open(url)
+        SystemSettingsOpener.openAccessibility()
+    }
+
+    /// 暂停/恢复取词：实际注销/重注册由 SelectionMonitor 完成，勾选态下次展开菜单时刷新
+    @objc private func togglePause(_ sender: Any?) {
+        onTogglePause?(!statusModel.hotKeyPaused)
+    }
+
+    /// 开机自启（macOS 13+ SMAppService）。裸可执行（swift run）没有 app bundle，
+    /// register() 会抛错——捕获后仅记日志，勾选态下次刷新时自动回正。
+    @objc private func toggleLoginItem(_ sender: Any?) {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+                Log.app.info("已关闭开机自启")
+            } else {
+                try service.register()
+                Log.app.info("已开启开机自启")
+            }
+        } catch {
+            Log.app.warning("开机自启切换失败（打包为 .app 后才可用）：\(error.localizedDescription)")
+        }
+    }
+
+    /// 历史记录（生词本）窗口：懒创建复用
+    @objc private func openHistory(_ sender: Any?) {
+        if historyWindowController == nil {
+            historyWindowController = HistoryWindowController()
+        }
+        historyWindowController?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 }

@@ -9,9 +9,13 @@ final class ResultPopover {
     private let scrollView: NSScrollView
     private let textView: NSTextView
     private var dismissMonitor: Any?
+    private var keyMonitor: Any?
     private var autoCloseItem: DispatchWorkItem?
 
     private var autoCloseDuration: TimeInterval = 15
+
+    /// 弹窗关闭时回调（点击外部 / 超时 / Esc）：AppDelegate 借此取消仍在进行的 LLM 请求，避免白烧 token
+    var onClose: (() -> Void)?
 
     private static let maxWidth: CGFloat = 560
     private static let maxContentHeight: CGFloat = 500
@@ -54,9 +58,8 @@ final class ResultPopover {
         container = HoverDetectingView()
         container.wantsLayer = true
         container.layer?.cornerRadius = 12
-        container.layer?.backgroundColor = NSColor(calibratedWhite: 0.99, alpha: 1.0).cgColor // 固定浅底
         container.layer?.borderWidth = 0.5
-        container.layer?.borderColor = NSColor(calibratedWhite: 0.85, alpha: 1.0).cgColor
+        applyAppearance()
         container.onHover = { [weak self] hovering in
             self?.hoverChanged(hovering)
         }
@@ -64,8 +67,15 @@ final class ResultPopover {
         panel.contentView = container
     }
 
+    /// 跟随系统亮暗外观：cgColor 是快照，弹窗生命周期短（≤25s），每次展示时刷新一次即可
+    private func applyAppearance() {
+        container.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        container.layer?.borderColor = NSColor.separatorColor.cgColor
+    }
+
     func show(_ attributed: NSAttributedString, at mouse: NSPoint, autoCloseAfter: TimeInterval = 15) {
         autoCloseDuration = autoCloseAfter
+        applyAppearance()
 
         let pad = Self.padding
         let textWidth = Self.maxWidth - pad * 2
@@ -100,15 +110,36 @@ final class ResultPopover {
 
         panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
         addDismissMonitor()
+        addKeyMonitor()
         scheduleAutoClose()
         panel.orderFront(nil)
     }
 
     func close() {
         removeDismissMonitor()
+        removeKeyMonitor()
         autoCloseItem?.cancel()
         autoCloseItem = nil
         panel.orderOut(nil)
+        onClose?()
+    }
+
+    /// Esc 关闭：panel 是 nonactivating 不会成为 key window，键事件仍发往原焦点应用，
+    /// 因此用本地监视器在事件分发前拦截；消费掉 Esc（return nil），避免前景应用二次响应
+    private func addKeyMonitor() {
+        removeKeyMonitor()
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.keyCode == 53 else { return event } // 53 = Esc
+            self.close()
+            return nil
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
+        }
     }
 
     /// 悬停期间冻结自动关闭倒计时，移开后重新计时
