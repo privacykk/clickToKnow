@@ -6,6 +6,9 @@
 .swiftpm/
 DerivedData/
 
+# 打包产物（.app / zip）
+dist/
+
 # Xcode
 *.xcodeproj
 xcuserdata/
