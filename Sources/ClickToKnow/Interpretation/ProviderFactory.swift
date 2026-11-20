@@ -13,8 +13,12 @@ enum ProviderFactory {
         switch config.apiProtocol {
         case .openAICompatible:
             return OpenAICompatProvider(config: endpoint)
+        case .openAIResponses:
+            return OpenAIResponsesProvider(config: endpoint)
         case .anthropic:
             return AnthropicProvider(config: endpoint)
+        case .gemini:
+            return GeminiProvider(config: endpoint)
         }
     }
 }

@@ -44,13 +44,16 @@ final class ProviderPresetsTests: XCTestCase {
         }
     }
 
-    /// 协议字段 sanity check：只有 anthropic 预设走 Anthropic Messages，其余全部 OpenAI 兼容
-    func testOnlyAnthropicPresetUsesAnthropicProtocol() {
+    /// 协议字段 sanity check：anthropic/gemini 走各自原生协议，其余全部 OpenAI Chat Completions
+    func testPresetProtocolsMatchVendor() {
         for preset in ProviderPresets.all {
-            XCTAssertEqual(
-                preset.apiProtocol, preset.id == "anthropic" ? .anthropic : .openAICompatible,
-                "\(preset.id) 的 apiProtocol 不符合预期"
-            )
+            let expected: APIProtocol
+            switch preset.id {
+            case "anthropic": expected = .anthropic
+            case "gemini": expected = .gemini
+            default: expected = .openAICompatible
+            }
+            XCTAssertEqual(preset.apiProtocol, expected, "\(preset.id) 的 apiProtocol 不符合预期")
         }
     }
 }
