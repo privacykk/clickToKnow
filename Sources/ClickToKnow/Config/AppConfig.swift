@@ -23,9 +23,11 @@ final class AppConfig {
 
     private enum Key {
         static let apiKey = "apiKey" // 遗留明文密钥：只读兼容与迁移，不再新增写入
-        static let baseURL = "baseURL"
-        static let model = "model"
-        static let apiProtocol = "apiProtocol"
+        static let baseURL = "baseURL" // 遗留单配置端点：迁移后即移除，不再读写
+        static let model = "model" // 同上
+        static let apiProtocol = "apiProtocol" // 同上
+        static let apiProfiles = "apiProfiles"
+        static let activeProfileID = "activeProfileID"
         static let hotKeyKeyCode = "hotKeyKeyCode"
         static let hotKeyModifiers = "hotKeyModifiers"
         static let blacklistedBundleIDs = "blacklistedBundleIDs"
@@ -39,38 +41,118 @@ final class AppConfig {
         case none
     }
 
-    var apiKey: String {
+    // MARK: - 已配置的 API（多配置）
+
+    /// 已保存的 API 配置列表（JSON 持久化）。密钥不在其中：按 profile id 分 account 存钥匙串。
+    var apiProfiles: [APIProfile] {
         get {
-            // 密钥优先从环境变量读取，避免写进代码/仓库
-            if apiKeyFromEnvironment {
-                return ProcessInfo.processInfo.environment["CLICKTOKNOW_API_KEY"] ?? ""
-            }
-            if let keychain = KeychainSecretStore.load(), !keychain.isEmpty {
-                return keychain
-            }
+            guard let data = defaults.data(forKey: Key.apiProfiles) else { return [] }
+            return (try? JSONDecoder().decode([APIProfile].self, from: data)) ?? []
+        }
+        set { defaults.set(try? JSONEncoder().encode(newValue), forKey: Key.apiProfiles) }
+    }
+
+    var activeProfileID: UUID? {
+        get { defaults.string(forKey: Key.activeProfileID).flatMap(UUID.init(uuidString:)) }
+        set { defaults.set(newValue?.uuidString, forKey: Key.activeProfileID) }
+    }
+
+    /// 当前生效配置：显式选中优先；选中项被删/数据损坏时回退列表第一项，避免莫名静默失能
+    var activeProfile: APIProfile? {
+        let profiles = apiProfiles
+        if let id = activeProfileID, let match = profiles.first(where: { $0.id == id }) {
+            return match
+        }
+        return profiles.first
+    }
+
+    /// 新增或更新配置；返回落库后的 profile（保留传入 id 幂等更新，不存在则追加）
+    @discardableResult
+    func upsertProfile(_ profile: APIProfile) -> APIProfile {
+        var profiles = apiProfiles
+        if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
+            profiles[index] = profile
+        } else {
+            profiles.append(profile)
+        }
+        apiProfiles = profiles
+        return profile
+    }
+
+    /// 删除配置并清理其钥匙串密钥；激活项被删时切到剩余第一项（无剩余则回到系统词典兜底）
+    func deleteProfile(id: UUID) {
+        apiProfiles = apiProfiles.filter { $0.id != id }
+        KeychainSecretStore.delete(account: Self.keychainAccount(for: id))
+        if activeProfileID == id {
+            activeProfileID = apiProfiles.first?.id
+        }
+    }
+
+    static func keychainAccount(for profileID: UUID) -> String {
+        "profile-\(profileID.uuidString)"
+    }
+
+    /// 指定配置实际生效的密钥（环境变量 → 该配置的钥匙串 → 仅生效配置可退遗留链）。
+    /// 供设置页「测试连接 / 拉取模型」对非生效配置也能取到正确密钥。
+    func effectiveAPIKey(for profile: APIProfile?) -> String {
+        if apiKeyFromEnvironment {
+            return ProcessInfo.processInfo.environment["CLICKTOKNOW_API_KEY"] ?? ""
+        }
+        guard let profile else { return "" }
+        if let key = KeychainSecretStore.load(account: Self.keychainAccount(for: profile.id)),
+           !key.isEmpty { return key }
+        if activeProfile?.id == profile.id {
+            if let key = KeychainSecretStore.load(), !key.isEmpty { return key }
             return defaults.string(forKey: Key.apiKey) ?? ""
         }
-        set { setAPIKey(newValue) }
+        return ""
     }
 
-    var baseURL: String {
-        get { defaults.string(forKey: Key.baseURL) ?? "" }
-        set { defaults.set(newValue, forKey: Key.baseURL) }
-    }
-
-    var model: String {
-        get { defaults.string(forKey: Key.model) ?? "" }
-        set { defaults.set(newValue, forKey: Key.model) }
-    }
-
-    /// API 协议（OpenAI 兼容 / Anthropic）；老配置无此键，回退 OpenAI 兼容，行为与升级前一致
-    var apiProtocol: APIProtocol {
-        get {
-            guard let raw = defaults.string(forKey: Key.apiProtocol) else { return .openAICompatible }
-            return APIProtocol(rawValue: raw) ?? .openAICompatible
+    /// 指定配置的已存密钥掩码。legacy 链（默认 account / UserDefaults 明文）只可能属于
+    /// 当前生效配置（单配置时代的遗留），非生效配置不回退到它，避免误导性回显。
+    func storedKeyMask(for profile: APIProfile) -> (masked: String, legacy: Bool)? {
+        if let key = KeychainSecretStore.load(account: Self.keychainAccount(for: profile.id)), !key.isEmpty {
+            return (Self.mask(key), false)
         }
-        set { defaults.set(newValue.rawValue, forKey: Key.apiProtocol) }
+        if activeProfile?.id == profile.id {
+            if let key = KeychainSecretStore.load(), !key.isEmpty { return (Self.mask(key), false) }
+            if let key = defaults.string(forKey: Key.apiKey), !key.isEmpty { return (Self.mask(key), true) }
+        }
+        return nil
     }
+
+    /// 清除指定配置的密钥（含其作为生效配置时的遗留存储）。返回是否确认清除成功。
+    @discardableResult
+    func clearAPIKey(for profile: APIProfile) -> Bool {
+        var succeeded = KeychainSecretStore.delete(account: Self.keychainAccount(for: profile.id))
+        if activeProfile?.id == profile.id {
+            succeeded = KeychainSecretStore.delete() && succeeded
+            defaults.removeObject(forKey: Key.apiKey)
+        }
+        return succeeded
+    }
+
+    // MARK: - 生效配置的只读视图（ProviderFactory / 状态页 / 测试器共用）
+
+    /// 密钥优先从环境变量读取，避免写进代码/仓库；其次按生效配置查钥匙串，再退遗留存储
+    var apiKey: String {
+        if apiKeyFromEnvironment {
+            return ProcessInfo.processInfo.environment["CLICKTOKNOW_API_KEY"] ?? ""
+        }
+        if let profile = activeProfile,
+           let keychain = KeychainSecretStore.load(account: Self.keychainAccount(for: profile.id)),
+           !keychain.isEmpty {
+            return keychain
+        }
+        if let keychain = KeychainSecretStore.load(), !keychain.isEmpty {
+            return keychain
+        }
+        return defaults.string(forKey: Key.apiKey) ?? ""
+    }
+
+    var baseURL: String { activeProfile?.baseURL ?? "" }
+    var model: String { activeProfile?.model ?? "" }
+    var apiProtocol: APIProtocol { activeProfile?.apiProtocol ?? .openAICompatible }
 
     /// 密钥是否由环境变量/.env 提供（true 时设置窗口无需回显，保存留空也不会禁用 LLM）
     var apiKeyFromEnvironment: Bool {
@@ -79,6 +161,9 @@ final class AppConfig {
 
     var apiKeySource: APIKeySource {
         if apiKeyFromEnvironment { return .environment }
+        if let profile = activeProfile,
+           let keychain = KeychainSecretStore.load(account: Self.keychainAccount(for: profile.id)),
+           !keychain.isEmpty { return .keychain }
         if let keychain = KeychainSecretStore.load(), !keychain.isEmpty { return .keychain }
         if let legacy = defaults.string(forKey: Key.apiKey), !legacy.isEmpty { return .legacyUserDefaults }
         return .none
@@ -98,7 +183,7 @@ final class AppConfig {
         return ProviderPresets.matching(baseURL: baseURL)?.apiKeyOptional ?? false
     }
 
-    /// 掩码密钥（前4后4，如 sk-a••••3456）；未配置密钥时为 nil。UI/日志一律不回显完整密钥。
+    /// 生效配置的掩码密钥（前4后4，如 sk-a••••3456）；未配置密钥时为 nil。UI/日志一律不回显完整密钥。
     var maskedAPIKey: String? {
         let key = apiKey
         guard !key.isEmpty else { return nil }
@@ -110,18 +195,21 @@ final class AppConfig {
         return "\(key.prefix(4))••••\(key.suffix(4))"
     }
 
-    /// 写入或清除密钥：优先钥匙串，失败回退 UserDefaults（裸可执行 ad-hoc 签名场景保底）。
+    /// 为生效配置写入或清除密钥：优先钥匙串，失败回退 UserDefaults（裸可执行 ad-hoc 签名场景保底）。
     /// 传空串 = 同时清除两处存储（环境变量来源的密钥不受影响，仍生效）。
     /// 返回值：true = 钥匙串操作成功（或非空密钥已安全落钥匙串）；false = 回退/删除失败，
     /// 调用方应据此如实提示，避免「已清除」但旧密钥仍在钥匙串里复活。
     @discardableResult
     func setAPIKey(_ value: String) -> Bool {
+        let account = activeProfile.map { Self.keychainAccount(for: $0.id) } ?? "apiKey"
         if value.isEmpty {
-            let keychainDeleted = KeychainSecretStore.delete()
+            let profileDeleted = KeychainSecretStore.delete(account: account)
+            // 默认 account 与明文属于同一生效配置（单配置时代遗留），一并清除避免旧值复活
+            let legacyDeleted = KeychainSecretStore.delete()
             defaults.removeObject(forKey: Key.apiKey)
-            return keychainDeleted
+            return profileDeleted && legacyDeleted
         }
-        if KeychainSecretStore.save(value) {
+        if KeychainSecretStore.save(value, account: account) {
             defaults.removeObject(forKey: Key.apiKey) // 同步移除遗留明文，保持单一事实来源
             return true
         }
@@ -129,14 +217,46 @@ final class AppConfig {
         return false
     }
 
-    /// 一次性迁移（幂等）：UserDefaults 遗留明文 → 钥匙串；钥匙串已有值时以其为准直接删明文。
-    /// 迁移失败保持原状（读取链仍会兜底到 UserDefaults），下次启动重试。
-    func migrateLegacyKeyIfNeeded() {
+    /// 一次性迁移（幂等），启动时调用：
+    /// 1. 单配置时代的端点三件套（baseURL/model/apiProtocol）→ 首个 APIProfile 并置为生效，
+    ///    旧默认 account 的钥匙串密钥随迁到 profile account；
+    /// 2. UserDefaults 遗留明文密钥 → 钥匙串；钥匙串已有值时以其为准直接删明文。
+    /// 迁移失败保持原状（读取链仍会兜底），下次启动重试。
+    func migrateLegacyConfigIfNeeded() {
+        if apiProfiles.isEmpty {
+            let legacyURL = (defaults.string(forKey: Key.baseURL) ?? "")
+                .trimmingCharacters(in: .whitespaces)
+            let legacyModel = (defaults.string(forKey: Key.model) ?? "")
+                .trimmingCharacters(in: .whitespaces)
+            if !legacyURL.isEmpty || !legacyModel.isEmpty {
+                let legacyProtocol = defaults.string(forKey: Key.apiProtocol)
+                    .flatMap(APIProtocol.init(rawValue:)) ?? .openAICompatible
+                let profile = APIProfile(
+                    apiProtocol: legacyProtocol, baseURL: legacyURL, model: legacyModel
+                )
+                if let legacyKey = KeychainSecretStore.load(), !legacyKey.isEmpty,
+                   KeychainSecretStore.save(legacyKey, account: Self.keychainAccount(for: profile.id)) {
+                    KeychainSecretStore.delete()
+                }
+                apiProfiles = [profile]
+                activeProfileID = profile.id
+                Log.config.info("单配置已迁移为 API 配置列表（1 项）")
+            }
+            // 端点三键无论是否建出 profile 都不再读写（profile 已成为唯一事实来源）
+            defaults.removeObject(forKey: Key.baseURL)
+            defaults.removeObject(forKey: Key.model)
+            defaults.removeObject(forKey: Key.apiProtocol)
+        }
+        migrateLegacyKeyIfNeeded()
+    }
+
+    private func migrateLegacyKeyIfNeeded() {
         guard let legacy = defaults.string(forKey: Key.apiKey), !legacy.isEmpty else { return }
-        if let existing = KeychainSecretStore.load(), !existing.isEmpty {
+        let account = activeProfile.map { Self.keychainAccount(for: $0.id) } ?? "apiKey"
+        if let existing = KeychainSecretStore.load(account: account), !existing.isEmpty {
             defaults.removeObject(forKey: Key.apiKey)
             Log.config.info("钥匙串已有密钥，已移除 UserDefaults 遗留明文")
-        } else if KeychainSecretStore.save(legacy) {
+        } else if KeychainSecretStore.save(legacy, account: account) {
             defaults.removeObject(forKey: Key.apiKey)
             Log.config.info("已将遗留明文密钥迁移至钥匙串")
         }
