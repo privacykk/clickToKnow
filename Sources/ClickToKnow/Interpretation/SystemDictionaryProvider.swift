@@ -2,8 +2,9 @@ import CoreServices
 import Foundation
 
 /// 无 LLM 配置时的兜底：查 macOS 系统本地词典/百科。
+/// 本地词典按词条精确查询，选区上下文用不上（签名保持一致即可）。
 final class SystemDictionaryProvider: InterpretationProvider {
-    func interpret(_ text: String) async throws -> Interpretation {
+    func interpret(_ text: String, context: String?) async throws -> Interpretation {
         // 词典查询可能 >1s（初始化索引/返回 HTML），放后台线程执行
         let definition: String? = await Task.detached(priority: .userInitiated) {
             let cfText = text as CFString
