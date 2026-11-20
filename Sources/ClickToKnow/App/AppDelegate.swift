@@ -25,8 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // 先做一次性密钥迁移再装配 UI，保证状态页首次展示的就是最终密钥来源
-        AppConfig.shared.migrateLegacyKeyIfNeeded()
+        // 先做一次性迁移（单配置 → 配置列表、明文密钥 → 钥匙串）再装配 UI，
+        // 保证状态页首次展示的就是最终密钥来源
+        AppConfig.shared.migrateLegacyConfigIfNeeded()
         statusBarController = StatusBarController(statusModel: statusModel)
         popover = ResultPopover()
         setupSelectionMonitor()
