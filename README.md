@@ -16,7 +16,7 @@ macOS 全局划词释义工具：选中文字 → 按快捷键 → 就地弹出*
 - 全局快捷键（默认 `⌥⌘K`，**可自定义**）抓取前台应用选中文本
 - **设置与状态中心**（三 Tab）：辅助功能权限实时状态、快捷键绑定与注册状态、释义来源、API Key 来源与掩码一屏可见
 - 无 AI Key 时用 macOS 系统词典兜底（`DCSCopyTextDefinition`）；Ollama 等**免密钥本地服务**填好 Base URL 与 Model 即可直接使用
-- 配 Key 后调用 LLM 做领域感知释义（OpenAI 兼容协议：通义千问 / DeepSeek / 月之暗面 / Ollama …；Anthropic 原生 Messages API），内置供应商预设与**连接测试**
+- 配 Key 后调用 LLM 做领域感知释义，支持四种 API 协议：OpenAI Chat Completions（通义千问 / DeepSeek / 月之暗面 / Ollama …）、OpenAI Responses、Anthropic Messages、Gemini API；可保存**多套 API 配置**并一键切换，内置供应商预设、**模型目录拉取**与**连接测试**
 - API Key 优先存**钥匙串**（不可用时自动回退本地存储并在状态页标注）
 - NSPanel 悬浮窗就地展示：不抢焦点、跟随系统亮暗外观、点击外部 / 超时 / `Esc` 关闭，关闭时自动取消在途请求
 - **取词失败可见反馈**：未授权 / 安全输入态（密码框）/ 黑名单应用 / 空选择 / 超时分别给出可操作提示，不再静默无反应
@@ -110,7 +110,7 @@ rm -rf ~/.clicktoknow                  # 若按 README 创建过 .env
 | Tab | 内容 |
 |---|---|
 | 状态总览 | 辅助功能权限（1s 实时刷新 + 直达系统设置）、快捷键绑定与注册状态、当前释义来源、API Key 掩码与来源、版本 / 可执行路径 |
-| 大模型 | 供应商预设一键填充，API 协议（OpenAI 兼容 / Anthropic）+ Base URL / API Key / Model 编辑，连接测试（成功返回耗时，失败分类展示原因），保存后立即生效 |
+| 大模型 | 多套 API 配置管理（列表切换启用 / 点选编辑 / 删除），四种 API 协议（OpenAI Chat Completions / OpenAI Responses / Anthropic Messages / Gemini API），供应商预设一键填充，模型目录拉取选择，连接测试（成功返回耗时，失败分类展示原因），保存后立即生效 |
 | 快捷键 | 点击录制新热键（需至少含 ⌘ / ⌥ / ⌃ 之一），冲突自动回滚原绑定，支持恢复默认 `⌥⌘K` |
 
 ### API Key
@@ -134,7 +134,7 @@ cp .env.example .env
 
 ### Base URL / Model
 
-「大模型」页选择供应商预设（DeepSeek / 通义千问 / 月之暗面 / 智谱清言 / OpenAI / Anthropic / Ollama 本地）一键填充，也可选「自定义」手填。API 协议随预设自动切换：Anthropic 走原生 Messages API（`x-api-key` 鉴权），其余走 OpenAI 兼容协议。保存前建议点「测试连接」验证：以表单当前值发一次最小对话请求，成功显示耗时，失败按网络不可达 / 401 密钥无效 / 404 模型或路径不存在等分类提示。以 DeepSeek 为例：
+「大模型」页选择供应商预设（DeepSeek / 通义千问 / 月之暗面 / 智谱清言 / OpenAI / Anthropic / Google Gemini / Ollama 本地）一键填充，也可选「自定义」手填。API 协议随预设自动切换；每套配置独立保存（密钥按配置隔离存钥匙串），已配置的 API 展示在下方列表，点圆圈切换启用、点内容载入编辑。Model 可手填、按预设推荐选择，或点「拉取模型」从端点拉取目录（Gemini 自动过滤不支持 generateContent 的模型）。保存前建议点「测试连接」验证：以表单当前值发一次最小对话请求，成功显示耗时，失败按网络不可达 / 401 密钥无效 / 404 模型或路径不存在等分类提示。以 DeepSeek 为例：
 
 | 项 | 值 |
 |---|---|
@@ -148,8 +148,8 @@ Sources/ClickToKnow/
 ├── ClickToKnowApp.swift        入口（regular 激活策略，启动即展示主窗口）
 ├── App/                        AppDelegate / 菜单栏（动态状态 + 暂停/自启/历史入口）/ 设置窗口壳 / 系统设置直达
 ├── Selection/                  全局快捷键（配置化 + 热重注册）+ AX 直读（主）+ ⌘C 抓词（兜底）+ 剪贴板快照恢复 + 键码翻译
-├── Interpretation/             Provider 协议（含流式可选能力）+ 系统词典 + OpenAI 兼容（SSE 流式 + ping）+ Anthropic + 连接测试门面 + 查询缓存
-├── Config/                     UserDefaults 配置（含应用黑名单）/ 钥匙串密钥存储 / 供应商预设 / 分级日志（os.Logger）
+├── Interpretation/             Provider 协议（含流式可选能力）+ 系统词典 + 四种 API 协议实现（OpenAI Chat Completions 含 SSE 流式）+ 模型目录拉取 + 连接测试门面 + 查询缓存
+├── Config/                     UserDefaults 配置（多 API 配置 + 应用黑名单）/ 钥匙串密钥存储（按配置隔离）/ 供应商预设 / 分级日志（os.Logger）
 ├── Status/                     运行时状态聚合（AppStatusModel）+ 历史记录持久化（HistoryStore）
 └── UI/                         NSPanel 悬浮窗 + Markdown 渲染 + SwiftUI 设置页（三 Tab）+ 历史记录窗口
 Packaging/                      Info.plist 模板 + 应用图标（Scripts/make_icon.swift 程序化生成）
@@ -161,7 +161,7 @@ Tests/ClickToKnowTests/         纯逻辑单测 + URLProtocol mock 集成测试�
 
 - 开发模式（`swift run`）下**辅助功能权限按进程路径记录，裸可执行文件授权难以持久**，钥匙串读取也可能因 ad-hoc 签名变化反复询问；这两点在 `./Scripts/package.sh` 打包的 `.app` 形态下均已解决（仅 ad-hoc 重签升级后授权可能需重勾一次）。
 - 默认打包产物为 universal binary（arm64 + x86_64）；只需单架构可 `ARCHS=arm64 ./Scripts/package.sh`（构建更快、产物更小）。
-- Anthropic 协议暂为非流式整包（OpenAI 兼容协议已支持 SSE 流式）。
+- Anthropic / OpenAI Responses / Gemini 协议暂为非流式整包（OpenAI Chat Completions 协议已支持 SSE 流式）。
 
 ## 后续（阶段 3）
 
