@@ -51,7 +51,12 @@ final class GlobalHotKey {
             &hotKeyRef
         )
 
-        return registerStatus == noErr
+        guard registerStatus == noErr else {
+            // 注册失败时清掉刚装的事件处理器，避免残留 handler 指向 self
+            unregister()
+            return false
+        }
+        return true
     }
 
     func unregister() {
