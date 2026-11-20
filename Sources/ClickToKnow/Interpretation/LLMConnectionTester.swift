@@ -14,7 +14,9 @@ struct LLMConnectionTester {
     init(makeProvider: @escaping (LLMEndpointConfig, APIProtocol) -> any LLMPinging = { config, apiProtocol in
         switch apiProtocol {
         case .openAICompatible: return OpenAICompatProvider(config: config)
+        case .openAIResponses: return OpenAIResponsesProvider(config: config)
         case .anthropic: return AnthropicProvider(config: config)
+        case .gemini: return GeminiProvider(config: config)
         }
     }) {
         self.makeProvider = makeProvider

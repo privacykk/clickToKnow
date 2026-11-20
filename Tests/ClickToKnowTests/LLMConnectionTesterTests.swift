@@ -42,8 +42,12 @@ final class LLMConnectionTesterTests: XCTestCase {
             switch apiProtocol {
             case .openAICompatible:
                 return OpenAICompatProvider(config: config, session: session)
+            case .openAIResponses:
+                return OpenAIResponsesProvider(config: config, session: session)
             case .anthropic:
                 return AnthropicProvider(config: config, session: session)
+            case .gemini:
+                return GeminiProvider(config: config, session: session)
             }
         }
     }
