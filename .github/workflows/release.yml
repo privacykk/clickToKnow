@@ -1,0 +1,81 @@
+name: Release
+
+# 打 tag 即出安装包：tag 名去掉可选的 v 前缀作为版本号，产物挂到该 tag 的 Release。
+# 已有的 ci.yml 只覆盖分支推送，不会因 tag 触发，因此发布流程独立在这里。
+on:
+  push:
+    tags:
+      # 用 ** 全量匹配再在第一步校验版本号格式：tag 过滤器只保证 * / ** 语义可靠，
+      # 写成 '[0-9]*' 这类字符类在过滤器里未必生效，会导致 tag 推上来却静默不触发。
+      - '**'
+
+permissions:
+  contents: write # 创建 Release、上传附件需要写权限
+
+jobs:
+  build-release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 解析 tag 版本号
+        id: meta
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # 接受 1.0.0 / v1.0.0 / 1.0.0-beta.1 这类语义化版本，其余 tag 不发布
+          if ! [[ "$TAG" =~ ^v?[0-9]+(\.[0-9]+)*(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "tag '$TAG' 不是版本号形式，跳过发布"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: 构建并打包（ad-hoc 签名）
+        if: steps.meta.outputs.skip == 'false'
+        env:
+          # 关闭时间戳后缀（默认 APPEND_TIMESTAMP=1），使产物名为 ClickToKnow-<版本>.dmg/.zip
+          APPEND_TIMESTAMP: '0'
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./Scripts/package.sh
+
+      - name: 上传构建产物
+        if: steps.meta.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClickToKnow-${{ steps.meta.outputs.version }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 创建 Release 并附加安装包
+        if: steps.meta.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          # tag 名来自外部输入：只经环境变量传入并在前面校验过格式，这里再挡一次选项注入
+          TAG="${GITHUB_REF_NAME}"
+          [[ -n "$TAG" && "$TAG" != -* ]] || { echo "非法 tag 名：$TAG" >&2; exit 1; }
+
+          NOTES="### 安装说明
+
+          - 下载 \`ClickToKnow-${VERSION}.dmg\`，拖入「应用程序」即可。
+          - 安装包为 **ad-hoc 签名、未经过 Apple 公证**：首次打开会被 Gatekeeper 拦截，
+            请到「系统设置 → 隐私与安全性」点「仍要打开」（旧系统可右键 App → 打开），
+            或执行 \`xattr -dr com.apple.quarantine /Applications/ClickToKnow.app\`。
+          - ad-hoc 签名下辅助功能授权按二进制 cdhash 记录，**覆盖安装会失效**；
+            失效后打开应用状态页点「一键修复」重新授权即可。"
+
+          FILES=(dist/*.dmg dist/*.zip)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release 已存在，覆盖上传附件"
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+          else
+            gh release create "$TAG" \
+              --title "ClickToKnow ${VERSION}" \
+              --notes "$NOTES" \
+              "${FILES[@]}"
+          fi
