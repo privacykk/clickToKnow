@@ -60,3 +60,24 @@ final class LLMUserPromptTests: XCTestCase {
         XCTAssertTrue(prompt.contains("\"\"\""))
     }
 }
+
+/// 端点配置的密钥清洗：粘贴密钥混入换行/空白时，CFNetwork 会静默丢弃 Authorization 头
+/// （服务器侧表现为「没传 key」的 401），装配 LLMEndpointConfig 时必须剥掉。
+final class LLMEndpointConfigSanitizationTests: XCTestCase {
+    /// 换行/Tab/空格全部剥除，中间与首尾同样处理（清洗发生在 header 构造之前）
+    func test_apiKey_stripsWhitespaceAndNewlines() {
+        let config = LLMEndpointConfig(baseURL: "https://litellm.example.com", apiKey: "sk-ab\ncd \tef\n", model: "m")
+        XCTAssertEqual(config.apiKey, "sk-abcdef")
+    }
+
+    /// 正常密钥原样保留（无副作用）
+    func test_apiKey_plainValueUnchanged() {
+        let config = LLMEndpointConfig(baseURL: "https://x", apiKey: "sk-test", model: "m")
+        XCTAssertEqual(config.apiKey, "sk-test")
+    }
+
+    /// 清洗函数本身：纯空白输入归空
+    func test_sanitizedAPIKey_blankBecomesEmpty() {
+        XCTAssertEqual(LLMProviderSupport.sanitizedAPIKey("\n\t \n"), "")
+    }
+}

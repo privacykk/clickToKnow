@@ -12,6 +12,8 @@ struct ModelCatalogFetcher {
 
     /// 返回去重并按字典序排序的模型 ID 列表；失败抛 InterpretationError（文案与连接测试同口径）
     func fetch(baseURL: String, apiKey: String, apiProtocol: APIProtocol) async throws -> [String] {
+        // apiKey 不走 LLMEndpointConfig，单独清洗：换行混入会让 CFNetwork 静默丢弃鉴权头
+        let apiKey = LLMProviderSupport.sanitizedAPIKey(apiKey)
         let base = baseURL.trimmingCharacters(in: .whitespaces)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard base.hasPrefix("http://") || base.hasPrefix("https://") else {

@@ -11,6 +11,13 @@ enum LLMProviderSupport {
         return URLSession(configuration: configuration)
     }
 
+    /// 密钥清洗：剥掉全部空白字符（含换行/Tab）。URLRequest 的 header 值一旦含换行，
+    /// CFNetwork 会静默丢弃整个 Authorization 头（服务器侧表现为「没传 key」的 401），
+    /// 粘贴密钥时混入的换行必须在构造鉴权头前拦下。API key 本不含合法空白，全剥最稳。
+    static func sanitizedAPIKey(_ key: String) -> String {
+        key.components(separatedBy: .whitespacesAndNewlines).joined()
+    }
+
     /// 把 URLError 翻译成人能看懂的话；timeoutSeconds 与调用方请求超时一致（ping 为 15s，interpret 为 20s）
     static func networkHint(_ error: URLError, timeoutSeconds: Int = 20) -> String {
         switch error.code {

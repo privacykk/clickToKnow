@@ -108,4 +108,21 @@ final class ModelCatalogFetcherTests: XCTestCase {
             XCTFail("预期 InterpretationError，实际 \(error)")
         }
     }
+
+    /// 粘贴密钥混入换行时：CFNetwork 会静默丢弃含换行的 Authorization 头（表现为「没传 key」），
+    /// fetch 必须先清洗再构造鉴权头
+    func testAPIKeyWithNewlineIsSanitized() async throws {
+        var captured: URLRequest?
+        MockURLProtocol.responder = { request in
+            captured = request
+            let body = #"{"data":[{"id":"m1"}]}"#
+            return (self.httpResponse(status: 200, url: request.url!), Data(body.utf8))
+        }
+        _ = try await makeFetcher().fetch(
+            baseURL: "https://litellm.example.com", apiKey: "sk-ab\ncd\n", apiProtocol: .openAIResponses
+        )
+        let request = try XCTUnwrap(captured)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer sk-abcd")
+        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization")?.first(where: { $0.isNewline }))
+    }
 }

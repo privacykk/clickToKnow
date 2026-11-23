@@ -32,6 +32,14 @@ struct LLMEndpointConfig {
     var baseURL: String
     var apiKey: String
     var model: String
+
+    /// apiKey 统一清洗：粘贴混入的换行/空白会让 CFNetwork 静默丢弃 Authorization 头，
+    /// 在装配端点时剥掉，划词/测试/ping 各 Provider 无需各自防御
+    init(baseURL: String, apiKey: String, model: String) {
+        self.baseURL = baseURL
+        self.apiKey = LLMProviderSupport.sanitizedAPIKey(apiKey)
+        self.model = model
+    }
 }
 
 /// 连接测试的最小能力抽象：LLMConnectionTester 面向它编程，不感知具体协议
