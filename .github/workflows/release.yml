@@ -81,6 +81,9 @@ jobs:
               gh release delete-asset "$TAG" "$ASSET" --yes
             done < stale-assets.txt
             gh release upload "$TAG" "${FILES[@]}"
+            # 该 tag 曾被删除再重建时，GitHub 会把原 Release 转成草稿（草稿对外不可见），
+            # 这里显式发布；对已发布的 Release 是无副作用的空操作
+            gh release edit "$TAG" --draft=false
           else
             gh release create "$TAG" \
               --title "ClickToKnow ${VERSION}" \
