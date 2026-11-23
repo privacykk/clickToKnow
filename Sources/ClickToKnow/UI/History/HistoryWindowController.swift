@@ -4,7 +4,8 @@ import SwiftUI
 /// 历史记录窗口：AppKit 壳 + SwiftUI 内容，与设置窗口同模式（懒创建复用）。
 @MainActor
 final class HistoryWindowController: NSWindowController {
-    private static let contentSize = NSSize(width: 720, height: 480)
+    /// 默认窗口尺寸：侧栏（搜索 + 筛选 + 列表）+ 详情两栏，宽一些才不局促
+    private static let contentSize = NSSize(width: 900, height: 580)
 
     /// 构建窗口并挂载 SwiftUI 历史视图
     init() {

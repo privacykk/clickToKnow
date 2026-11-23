@@ -32,6 +32,9 @@ struct HistoryEntry: Codable, Equatable, Identifiable {
 final class HistoryStore {
     static let shared = HistoryStore()
 
+    /// 记录变更通知（新增 / 单条删除 / 清空）：历史窗口常驻时据此实时刷新列表
+    static let didChangeNotification = Notification.Name("ClickToKnowHistoryDidChange")
+
     /// 历史记录文件路径（Application Support/ClickToKnow/history.json）
     private let fileURL: URL
     /// 条目上限，超出淘汰最旧
@@ -62,21 +65,32 @@ final class HistoryStore {
             entries.removeLast(entries.count - capacity)
         }
         save()
+        notifyChange()
+    }
+
+    /// 删除单条记录（id 不存在时忽略）并落盘
+    func remove(id: HistoryEntry.ID) {
+        guard entries.contains(where: { $0.id == id }) else { return }
+        entries.removeAll { $0.id == id }
+        save()
+        notifyChange()
     }
 
     /// 清空全部记录并落盘
     func removeAll() {
         entries.removeAll()
         save()
+        notifyChange()
     }
 
     // MARK: - 导出
 
-    /// 标准 CSV：字段含逗号/引号/换行时按 RFC 4180 加引号转义
-    func exportCSV() -> String {
+    /// 标准 CSV：字段含逗号/引号/换行时按 RFC 4180 加引号转义。
+    /// source 传 nil 导出全部；历史窗口传入当前筛选结果，做到「所见即所得」。
+    func exportCSV(_ source: [HistoryEntry]? = nil) -> String {
         var lines = ["term,source,model,date,content"]
         let formatter = ISO8601DateFormatter()
-        for entry in entries {
+        for entry in source ?? entries {
             let fields = [
                 Self.csvField(entry.term),
                 entry.source,
@@ -89,9 +103,9 @@ final class HistoryStore {
         return lines.joined(separator: "\n") + "\n"
     }
 
-    /// Anki 导入格式：TSV（正面=词条，背面=释义，换行转 <br>）
-    func exportAnkiTSV() -> String {
-        entries.map { entry in
+    /// Anki 导入格式：TSV（正面=词条，背面=释义，换行转 <br>）。source 语义同 exportCSV
+    func exportAnkiTSV(_ source: [HistoryEntry]? = nil) -> String {
+        (source ?? entries).map { entry in
             let front = Self.tsvField(entry.term)
             let back = Self.tsvField(entry.content)
                 .replacingOccurrences(of: "\n", with: "<br>")
@@ -112,6 +126,11 @@ final class HistoryStore {
     }
 
     // MARK: - 持久化
+
+    /// 广播变更（历史窗口订阅后实时刷新；调用方均在主线程）
+    private func notifyChange() {
+        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+    }
 
     /// 原子写盘：日期用 ISO 8601，失败仅记日志（下次写入重试）
     private func save() {

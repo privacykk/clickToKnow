@@ -2,9 +2,14 @@
 # ClickToKnow 打包脚本：release 构建 → .app bundle → 代码签名 →（可选公证）→ DMG + zip 双格式分发件
 #
 # 用法：
-#   ./Scripts/package.sh                          # ad-hoc 签名（无需开发者账号，本地/内部分发）
+#   ./Scripts/package.sh                          # 自动选择：本机有「ClickToKnow Local Signing」就用它，
+#                                                 # 否则回退 ad-hoc（无需开发者账号，本地/内部分发）
 #   SIGN_IDENTITY="Developer ID Application: 姓名 (TEAMID)" NOTARIZE=1 ./Scripts/package.sh
 #                                                 # 正式分发：Developer ID + hardened runtime + 公证 + 装订
+#
+# 辅助功能授权与签名：系统按「代码签名要求」记录 TCC 授权，ad-hoc 的要求就是二进制 cdhash，
+# 每次重新打包都会让列表里的旧授权失效（表现为「列表里有、却显示未授权」）。
+# 一次性执行 ./Scripts/make_signing_cert.sh 生成固定证书后，覆盖安装不再丢授权。
 #
 # 可用环境变量：
 #   APP_NAME        默认 ClickToKnow
@@ -14,7 +19,8 @@
 #   APPEND_TIMESTAMP 默认 1；置 1 则把 TIMESTAMP 追加到 VERSION（如 0.2.1-20261120-163725），
 #                   使每次构建的 zip/dmg/Info.plist 版本号互不覆盖；置 0 关闭
 #   TIMESTAMP       默认当前时间（date +%Y%m%d-%H%M%S）；可显式指定以固定时间戳
-#   SIGN_IDENTITY   默认 "-"（ad-hoc）；正式签名填 "Developer ID Application: ... (TEAMID)"
+#   SIGN_IDENTITY   未设置时自动探测本机稳定签名身份，找不到才用 "-"（ad-hoc）；
+#                   正式签名填 "Developer ID Application: ... (TEAMID)"
 #   NOTARIZE        默认 0；置 1 走 notarytool 公证 + stapler 装订（需先 store-credentials）
 #   NOTARY_PROFILE  notarytool 钥匙串配置档名，默认 notarytool
 #   SWIFT_BUILD_ARGS  追加给 swift build 的参数（如 SwiftPM 缓存路径重定向）
@@ -36,7 +42,15 @@ TIMESTAMP="${TIMESTAMP:-$(date +%Y%m%d-%H%M%S)}"
 if [ "$APPEND_TIMESTAMP" = "1" ]; then
     VERSION="$VERSION-$TIMESTAMP"
 fi
+# 本机固定签名身份（Scripts/make_signing_cert.sh 创建）：用它签名后 TCC 授权要求变成
+# 「bundle id + 证书叶子哈希」，覆盖安装不再失效；未显式指定签名身份时优先自动采用
+LOCAL_SIGN_IDENTITY="ClickToKnow Local Signing"
+SIGN_IDENTITY_WAS_SET="${SIGN_IDENTITY:-}"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+if [ -z "$SIGN_IDENTITY_WAS_SET" ] && security find-identity -v -p codesigning 2>/dev/null \
+        | grep -qF "$LOCAL_SIGN_IDENTITY"; then
+    SIGN_IDENTITY="$LOCAL_SIGN_IDENTITY"
+fi
 NOTARIZE="${NOTARIZE:-0}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-notarytool}"
 DIST="dist"
@@ -97,7 +111,7 @@ fi
 
 echo "==> 3/6 代码签名（identity: ${SIGN_IDENTITY}）"
 SIGN_ARGS=(--force --sign "$SIGN_IDENTITY")
-if [ "$SIGN_IDENTITY" != "-" ]; then
+if [ "$SIGN_IDENTITY" != "-" ] && [ "$SIGN_IDENTITY" != "$LOCAL_SIGN_IDENTITY" ]; then
     # 正式分发：hardened runtime + 安全时间戳（公证硬性要求）
     SIGN_ARGS+=(--options runtime --timestamp)
 fi
@@ -133,7 +147,7 @@ hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" -ov -format UDZO "$DMG
 rm -rf "$STAGING"
 hdiutil verify "$DMG" >/dev/null && echo "    DMG 校验通过"
 
-if [ "$SIGN_IDENTITY" != "-" ]; then
+if [ "$SIGN_IDENTITY" != "-" ] && [ "$SIGN_IDENTITY" != "$LOCAL_SIGN_IDENTITY" ]; then
     codesign --force --sign "$SIGN_IDENTITY" --timestamp "$DMG"
 fi
 if [ "$NOTARIZE" = "1" ]; then
@@ -149,8 +163,17 @@ echo "    分发件：$DMG"
 echo "            $ZIP"
 if [ "$SIGN_IDENTITY" = "-" ]; then
     cat <<'EOF'
-    ⚠️ ad-hoc 签名未经过公证，用户首次打开会被 Gatekeeper 拦截：
-       系统设置 → 隐私与安全性 → 「仍要打开」（旧系统可右键 App → 打开），
-       或终端执行：xattr -dr com.apple.quarantine /Applications/ClickToKnow.app
+    ⚠️ 使用 ad-hoc 签名：
+      1) 未经过公证，用户首次打开会被 Gatekeeper 拦截：
+         系统设置 → 隐私与安全性 → 「仍要打开」（旧系统可右键 App → 打开），
+         或终端执行：xattr -dr com.apple.quarantine /Applications/ClickToKnow.app
+      2) 辅助功能授权按二进制 cdhash 记录，每次覆盖安装都会失效
+         （系统设置里条目还在，却显示未授权）。一次性修复：
+         ./Scripts/make_signing_cert.sh 生成固定签名身份后重新打包。
+EOF
+elif [ "$SIGN_IDENTITY" = "$LOCAL_SIGN_IDENTITY" ]; then
+    cat <<EOF
+    已使用本机固定签名身份「$SIGN_IDENTITY」：覆盖安装后辅助功能授权仍然有效。
+    该证书只在本机受信任，分发给他人仍需「仍要打开」放行（或改用 Developer ID 公证分发）。
 EOF
 fi

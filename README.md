@@ -8,13 +8,15 @@ macOS 全局划词释义工具：选中文字 → 按快捷键 → 就地弹出*
 |---|---|---|
 | 开发运行 | `swift run` | 见下文「运行」 |
 | 单元测试 | `swift test` | 见下文「测试」 |
-| **打包分发** | `./Scripts/package.sh` | `dist/ClickToKnow.app` + `dist/ClickToKnow-<版本>.dmg` / `.zip`，详见下文「打包与分发」 |
+| 打包分发 | `./Scripts/package.sh` | `dist/ClickToKnow.app` + `dist/ClickToKnow-<版本>.dmg` / `.zip`，详见下文「打包与分发」 |
+| 固定签名身份（一次性） | `./Scripts/make_signing_cert.sh` | 生成「ClickToKnow Local Signing」证书，覆盖安装不再丢辅助功能授权 |
 | 卸载清理 | `./Scripts/uninstall.sh`（`--dry-run` 预演 / `--all` 连 `.env` 一起删） | 移除 .app、配置 plist 与钥匙串密钥，详见下文「卸载」 |
 
 ## 功能
 
 - 全局快捷键（默认 `⌥⌘K`，**可自定义**）抓取前台应用选中文本
 - **设置与状态中心**（三 Tab）：辅助功能权限实时状态、快捷键绑定与注册状态、释义来源、API Key 来源与掩码一屏可见
+- **授权失效能识别并一键修复**：覆盖安装换掉签名后，系统设置里条目仍在却失效（显示未授权），状态页/菜单栏点「修复授权」重建授权记录，不必手动移除条目再重新添加
 - 无 AI Key 时用 macOS 系统词典兜底（`DCSCopyTextDefinition`）；Ollama 等**免密钥本地服务**填好 Base URL 与 Model 即可直接使用
 - 配 Key 后调用 LLM 做领域感知释义，支持四种 API 协议：OpenAI Chat Completions（通义千问 / DeepSeek / 月之暗面 / Ollama …）、OpenAI Responses、Anthropic Messages、Gemini API；可保存**多套 API 配置**并一键切换，内置供应商预设、**模型目录拉取**与**连接测试**
 - API Key 优先存**钥匙串**（不可用时自动回退本地存储并在状态页标注）
@@ -23,7 +25,7 @@ macOS 全局划词释义工具：选中文字 → 按快捷键 → 就地弹出*
 - **AX 直读为主路径**：不碰剪贴板、对禁复制应用有效，弹窗贴选区（而非鼠标）展示，选区前后文随查询发送（LLM 领域判断更准）；未实现 AX 的应用自动回退模拟 ⌘C
 - **SSE 流式输出**（OpenAI 兼容协议）：弹窗边收边渲染，长释义不再有数秒白屏
 - **进程内查询缓存**：同一词条（含供应商 + 模型指纹）重复查询零延迟零费用
-- **历史记录（生词本）**：查询自动落盘（上限 500 条），菜单栏「历史记录…」浏览，支持导出 CSV / Anki TSV
+- **历史记录（生词本）**：查询自动落盘（上限 500 条），菜单栏「历史记录…」按日分组浏览，支持关键词搜索、来源筛选、单条删除与清空确认，可按当前筛选导出 CSV / Anki TSV
 - **应用黑名单**：密码 / 密钥管理类应用（1Password、钥匙串访问等）内置不抓取，`defaults write ClickToKnow blacklistedBundleIDs -array <bundleID>` 可追加
 - 菜单栏**暂停取词**开关（投屏 / 演示 / 输密码场景）与**开机自启**开关（SMAppService，打包为 .app 后生效）
 - 分级日志（os.Logger，`log show --predicate 'subsystem == "ClickToKnow"'`）与**诊断信息导出**（状态页，脱敏）
@@ -71,12 +73,26 @@ swift test
 
 公证前需一次性存储凭据：`xcrun notarytool store-credentials notarytool --apple-id you@example.com --team-id TEAMID`。
 
+### 本机固定签名身份（解决覆盖安装后辅助功能授权失效）
+
+系统把辅助功能授权按**代码签名要求（csreq）**记录：ad-hoc 签名的要求就是二进制 cdhash，每重新打包一次 cdhash 就变一次，于是系统设置列表里还留着 ClickToKnow 条目、开关甚至仍是勾选态，但 `AXIsProcessTrusted()` 返回 false——只能移除后重新添加才会重新写入授权。
+
+一次性生成一张本机自签名证书即可根治（证书不变 → 授权要求不变 → 覆盖安装无需重授权）：
+
+```bash
+./Scripts/make_signing_cert.sh   # 生成并信任「ClickToKnow Local Signing」（可能需要输入登录密码）
+./Scripts/package.sh             # 之后自动使用该身份签名
+```
+
+> 该证书只在本机受信任：自己覆盖安装完全免授权；分发给他人仍需「仍要打开」放行（想彻底免提示只能用 Developer ID + 公证）。
+> 已安装的旧 ad-hoc 版本换签名后需要重新授权**一次**，此后升级不再失效。
+
 ### 用户安装说明（ad-hoc 签名版）
 
 1. 打开 `ClickToKnow-0.2.1.dmg`，把 `ClickToKnow.app` 拖入「Applications」（zip 版则解压后拖入）
 2. 首次打开会提示「无法验证开发者」：**系统设置 → 隐私与安全性 → 点「仍要打开」**（旧版 macOS 可右键 App → 打开；或终端 `xattr -dr com.apple.quarantine /Applications/ClickToKnow.app`）
 3. 首次划词按引导到 **系统设置 → 隐私与安全 → 辅助功能** 勾选 ClickToKnow（`.app` 签名后授权稳定，只需一次）
-4. 升级替换 `.app` 后若为 ad-hoc 重新签名，辅助功能授权可能需重新勾选；Developer ID 签名则完全不需要
+4. 升级替换 `.app`：用 Developer ID 或本机固定身份签名时授权自动保持；ad-hoc 重新签名则需重新授权——状态总览会把它识别为「授权已失效」，点「修复授权」即可，无需手动移除再添加
 
 ### 卸载
 
@@ -150,16 +166,17 @@ Sources/ClickToKnow/
 ├── Selection/                  全局快捷键（配置化 + 热重注册）+ AX 直读（主）+ ⌘C 抓词（兜底）+ 剪贴板快照恢复 + 键码翻译
 ├── Interpretation/             Provider 协议（含流式可选能力）+ 系统词典 + 四种 API 协议实现（OpenAI Chat Completions 含 SSE 流式）+ 模型目录拉取 + 连接测试门面 + 查询缓存
 ├── Config/                     UserDefaults 配置（多 API 配置 + 应用黑名单）/ 钥匙串密钥存储（按配置隔离）/ 供应商预设 / 分级日志（os.Logger）
-├── Status/                     运行时状态聚合（AppStatusModel）+ 历史记录持久化（HistoryStore）
-└── UI/                         NSPanel 悬浮窗 + Markdown 渲染 + SwiftUI 设置页（三 Tab）+ 历史记录窗口
+├── Status/                     运行时状态聚合（AppStatusModel）+ 辅助功能授权三态与失效识别 + 历史记录持久化（HistoryStore）
+└── UI/                         NSPanel 悬浮窗 + Markdown 渲染（弹窗 NSAttributedString / SwiftUI 双实现）+ SwiftUI 设置页（三 Tab）+ 历史记录窗口（搜索 / 筛选 / 导出）
 Packaging/                      Info.plist 模板 + 应用图标（Scripts/make_icon.swift 程序化生成）
-Scripts/                        package.sh 一键打包（默认 universal binary）/ uninstall.sh 卸载清理 / make_icon.swift 图标生成
+Scripts/                        package.sh 一键打包（默认 universal binary）/ make_signing_cert.sh 本机固定签名身份 / uninstall.sh 卸载清理 / make_icon.swift 图标生成
 Tests/ClickToKnowTests/         纯逻辑单测 + URLProtocol mock 集成测试（含 SSE 流式与历史导出用例）
 ```
 
 ## 已知限制
 
-- 开发模式（`swift run`）下**辅助功能权限按进程路径记录，裸可执行文件授权难以持久**，钥匙串读取也可能因 ad-hoc 签名变化反复询问；这两点在 `./Scripts/package.sh` 打包的 `.app` 形态下均已解决（仅 ad-hoc 重签升级后授权可能需重勾一次）。
+- 开发模式（`swift run`）下**辅助功能权限按进程路径记录，裸可执行文件授权难以持久**，钥匙串读取也可能因 ad-hoc 签名变化反复询问；打包成 `.app` 并执行一次 `./Scripts/make_signing_cert.sh` 后这两点均解决（固定证书签名，覆盖安装不再失效）。
+- 系统设置里「条目还在却显示未授权」是 ad-hoc 签名换版后的典型症状：状态总览会标为「授权已失效」并提供「修复授权」（重置 TCC 条目 + 重新弹授权），无需再手动移除条目后重新添加。
 - 默认打包产物为 universal binary（arm64 + x86_64）；只需单架构可 `ARCHS=arm64 ./Scripts/package.sh`（构建更快、产物更小）。
 - Anthropic / OpenAI Responses / Gemini 协议暂为非流式整包（OpenAI Chat Completions 协议已支持 SSE 流式）。
 

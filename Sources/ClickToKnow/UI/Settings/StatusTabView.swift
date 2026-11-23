@@ -20,17 +20,17 @@ struct StatusTabView: View {
             Section("权限") {
                 LabeledContent("辅助功能权限") {
                     HStack(spacing: 10) {
-                        StatusBadge(
-                            level: statusModel.accessibilityGranted ? .ok : .bad,
-                            text: statusModel.accessibilityGranted ? "已授权" : "未授权"
-                        )
+                        StatusBadge(level: permissionBadgeLevel, text: permissionBadgeText)
                         if !statusModel.accessibilityGranted {
+                            // 未授权时始终提供「修复授权」：旧版本升级上来的用户本机还没有签名记录，
+                            // 会被判成「从未授权」，但实际症状是一样的（列表里条目已失效）
+                            repairButton
                             Button("打开系统设置") { SystemSettingsOpener.openAccessibility() }
                         }
                         Button("刷新") { statusModel.refresh() }
                     }
                 }
-                Text("抓取选词依赖模拟 ⌘C；授权后若划词仍无效，请重启 ClickToKnow（裸可执行文件重新编译会使授权失效）。")
+                Text(permissionFootnote)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -132,16 +132,24 @@ struct StatusTabView: View {
         .padding(.vertical, 4)
     }
 
-    /// 顶部结论对应的动作：页签跳转，或直达系统设置的权限面板
+    /// 顶部结论对应的动作：页签跳转、直达系统设置，或就地修复失效授权
     private enum SummaryAction {
         case tab(SettingsTab)
         case openAccessibility
+        /// 覆盖安装后签名变更导致的授权失效：重置 TCC 条目再重新授权
+        case repairAccessibility
     }
 
     /// 结论优先级：权限（完全不可用）> 大模型（缺配置/缺密钥）> 热键注册 > 暂停
     private var summaryAction: (title: String, action: SummaryAction)? {
-        if !statusModel.accessibilityGranted {
-            return ("打开系统设置", .openAccessibility)
+        switch statusModel.accessibilityState {
+        case .invalidated:
+            return ("修复授权", .repairAccessibility)
+        case .notGranted:
+            // 与失效态同一个动作：都会先重置 TCC 条目再弹系统授权，首次授权同样适用
+            return ("去授权", .repairAccessibility)
+        case .granted:
+            break
         }
         switch statusModel.llmStatus {
         case .notConfigured:
@@ -171,7 +179,11 @@ struct StatusTabView: View {
     }
 
     private var summaryTitle: String {
-        if !statusModel.accessibilityGranted { return "还不能用：缺少辅助功能权限" }
+        switch statusModel.accessibilityState {
+        case .invalidated: return "还不能用：辅助功能授权已失效"
+        case .notGranted: return "还不能用：缺少辅助功能权限"
+        case .granted: break
+        }
         switch statusModel.llmStatus {
         case .notConfigured:
             return statusModel.profileCount == 0 ? "尚未配置大模型" : "当前配置不完整"
@@ -185,8 +197,13 @@ struct StatusTabView: View {
     }
 
     private var summaryDetail: String {
-        if !statusModel.accessibilityGranted {
-            return "划词释义依赖模拟 ⌘C，先在系统设置中授权后重启应用。"
+        switch statusModel.accessibilityState {
+        case .invalidated:
+            return "覆盖安装改变了应用签名，系统设置里的旧授权已失效；点「修复授权」重建授权记录即可，通常无需手动移除再添加。"
+        case .notGranted:
+            return "划词释义依赖模拟 ⌘C。点「去授权」会弹出系统授权提示并打开辅助功能面板，勾选 ClickToKnow 即可。"
+        case .granted:
+            break
         }
         switch statusModel.llmStatus {
         case .notConfigured:
@@ -212,6 +229,54 @@ struct StatusTabView: View {
             selection = tab
         case .openAccessibility:
             SystemSettingsOpener.openAccessibility()
+        case .repairAccessibility:
+            statusModel.repairAccessibilityPermission()
+        }
+    }
+
+    // MARK: - 权限状态
+
+    /// 修复授权按钮：失效态用醒目样式强调（这是覆盖安装后最需要的动作）
+    @ViewBuilder
+    private var repairButton: some View {
+        let button = Button("修复授权") { statusModel.repairAccessibilityPermission() }
+        if statusModel.accessibilityState == .invalidated {
+            button.buttonStyle(.borderedProminent)
+        } else {
+            button.buttonStyle(.bordered)
+        }
+    }
+
+    /// 失效授权用橙色：系统设置里仍列着本应用，只是旧签名上的授权不再匹配当前程序
+    private var permissionBadgeLevel: StatusBadge.Level {
+        switch statusModel.accessibilityState {
+        case .granted: return .ok
+        case .notGranted: return .bad
+        case .invalidated: return .warn
+        }
+    }
+
+    private var permissionBadgeText: String {
+        switch statusModel.accessibilityState {
+        case .granted: return "已授权"
+        case .notGranted: return "未授权"
+        case .invalidated: return "授权已失效（应用签名已变更）"
+        }
+    }
+
+    /// 权限说明随三态切换：失效态必须讲清「列表里还有条目、但已不可用」以及怎么修
+    private var permissionFootnote: String {
+        switch statusModel.accessibilityState {
+        case .granted:
+            return "抓取选词依赖模拟 ⌘C；AX 直读失败时会回退该路径。"
+        case .notGranted:
+            return "抓取选词依赖模拟 ⌘C。若系统设置里已经勾选 ClickToKnow 却仍显示未授权（覆盖安装后常见），点「修复授权」重建授权记录即可。"
+        case .invalidated:
+            return """
+            系统设置里仍列着 ClickToKnow，但覆盖安装改变了应用签名，旧授权无法匹配当前程序，\
+            因此这里显示未授权。点「修复授权」会重置本应用的授权记录并弹出系统授权提示；\
+            若仍不生效，请在列表中先关闭再打开开关，或移除条目后重新添加。
+            """
         }
     }
 

@@ -7,8 +7,10 @@ import ServiceManagement
 /// 只负责「读状态 + 轮询生命周期」，不修改任何配置；轮询 Timer 仅在监控开启期间存在。
 @MainActor
 final class AppStatusModel: ObservableObject {
-    /// 辅助功能是否已授权
-    @Published private(set) var accessibilityGranted = false
+    /// 辅助功能授权状态：已授权 / 未授权 / 曾授权但签名变更后失效（覆盖安装的典型症状）
+    @Published private(set) var accessibilityState: AccessibilityPermissionState = .notGranted
+    /// 辅助功能是否已授权（三态里的可用态，UI 大量沿用此判断）
+    var accessibilityGranted: Bool { accessibilityState == .granted }
     /// 当前生效快捷键绑定
     @Published private(set) var hotKeyBinding = CarbonKeyTranslator.defaultBinding
     /// 热键是否注册成功
@@ -67,6 +69,9 @@ final class AppStatusModel: ObservableObject {
     /// 权限按进程路径记录，swift run 重新编译后路径虽同但二进制已变，授权可能失效
     let executablePath: String = AppStatusModel.resolveExecutablePath()
 
+    /// 授权记录：用「上次确认授权时的签名」识别覆盖安装导致的授权失效
+    private let grantRecord = AccessibilityGrantRecord()
+
     private var pollTimer: Timer?
 
     /// 开启 1s 轮询（幂等）。设置窗口成为 key / 状态 Tab 出现时调用。
@@ -94,7 +99,7 @@ final class AppStatusModel: ObservableObject {
         生成时间：\(Date().formatted(date: .complete, time: .standard))
         版本：\(Self.version)
         可执行路径：\(executablePath)
-        辅助功能权限：\(accessibilityGranted ? "已授权" : "未授权")
+        辅助功能权限：\(self.accessibilityDiagnosticSummary)
         快捷键：\(hotKeyBinding.displayString)（\(hotKeyPaused ? "已暂停" : (hotKeyRegistered ? "已注册" : "注册失败"))）
         释义来源：\(llmDiagnosticSummary)
         API Key：\(maskedKey ?? "未配置")（来源：\(keySource.rawValue)）
@@ -116,10 +121,51 @@ final class AppStatusModel: ObservableObject {
         }
     }
 
+    /// 诊断报告里的权限结论（三态区分，覆盖安装失效能一眼看出）
+    private var accessibilityDiagnosticSummary: String {
+        switch accessibilityState {
+        case .granted: return "已授权"
+        case .notGranted: return "未授权"
+        case .invalidated: return "已授权但当前签名与授权记录不一致（覆盖安装后失效，需重新授权）"
+        }
+    }
+
+    /// 修复「系统设置里仍列着、却显示未授权」的失效授权：
+    /// 先清掉本应用在 TCC 里的旧条目（旧 csreq 与当前二进制签名不匹配，只在面板里勾选不会刷新），
+    /// 再触发系统授权提示，让系统按当前签名把本应用重新加入列表——用户随后只需打开开关。
+    func repairAccessibilityPermission() {
+        grantRecord.forget()
+        if let bundleID = Bundle.main.bundleIdentifier {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            task.arguments = ["reset", "Accessibility", bundleID]
+            do {
+                try task.run()
+                // tccutil 是毫秒级的本地命令，同步等待可保证「重置完成再弹授权」的顺序
+                task.waitUntilExit()
+                if task.terminationStatus != 0 {
+                    Log.app.warning("tccutil reset 失败（status \(task.terminationStatus)），需手动移除条目后重新添加")
+                }
+            } catch {
+                Log.app.error("无法执行 tccutil：\(error.localizedDescription)")
+            }
+        } else {
+            Log.app.warning("裸可执行文件没有 bundle id，跳过 TCC 条目重置")
+        }
+
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+        SystemSettingsOpener.openAccessibility()
+        refresh()
+    }
+
     /// 幂等全量拉取：轮询、菜单展开、Tab 切入、保存配置后都会调用。
     /// 钥匙串读取经 KeychainSecretStore 内存缓存，秒级频率不会反复触发系统询问。
     func refresh() {
-        accessibilityGranted = AXIsProcessTrusted()
+        accessibilityState = grantRecord.state(
+            trusted: AXIsProcessTrusted(),
+            signature: CodeSignature.current
+        )
 
         let config = AppConfig.shared
         if let monitor = selectionMonitor {

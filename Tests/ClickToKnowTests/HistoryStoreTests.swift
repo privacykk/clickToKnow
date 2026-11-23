@@ -75,4 +75,35 @@ final class HistoryStoreTests: XCTestCase {
         XCTAssertTrue(store.entries.isEmpty)
         XCTAssertEqual(HistoryStore(directory: directory).entries.count, 0)
     }
+
+    /// 单条删除只移除目标记录，其余顺序与磁盘内容保持一致
+    func test_removeById() {
+        store.add(makeInterpretation("helm"), model: nil)
+        store.add(makeInterpretation("ingress"), model: nil)
+        let target = store.entries[1]
+        store.remove(id: target.id)
+        XCTAssertEqual(store.entries.map(\.term), ["ingress"])
+        XCTAssertEqual(HistoryStore(directory: directory).entries.map(\.term), ["ingress"])
+    }
+
+    /// 删除不存在的 id 不应改动数据，也不应重复落盘
+    func test_removeUnknownIdIsNoop() {
+        store.add(makeInterpretation("helm"), model: nil)
+        store.remove(id: UUID())
+        XCTAssertEqual(store.entries.map(\.term), ["helm"])
+    }
+
+    /// 导出子集：历史窗口按当前筛选导出，选中之外的数据不应混入
+    func test_exportSubset_onlyGivenEntries() {
+        store.add(makeInterpretation("helm"), model: nil)
+        store.add(makeInterpretation("ingress"), model: nil)
+        let filtered = store.entries.filter { $0.term == "helm" }
+
+        let csv = store.exportCSV(filtered)
+        XCTAssertTrue(csv.contains("helm"))
+        XCTAssertFalse(csv.contains("ingress"))
+
+        let tsv = store.exportAnkiTSV(filtered)
+        XCTAssertEqual(tsv, "helm\t释义\n")
+    }
 }

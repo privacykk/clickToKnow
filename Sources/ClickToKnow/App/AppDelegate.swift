@@ -78,11 +78,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let message: String
         switch failure {
         case .noAccessibilityPermission:
-            message = """
-            **未获得辅助功能权限**
+            // 覆盖安装换掉二进制后，系统设置里旧条目还在但已失效：给出针对性的修复路径，
+            // 否则用户盯着一个「已勾选」的开关无从下手
+            statusModel.refresh()
+            if statusModel.accessibilityState == .invalidated {
+                message = """
+                **辅助功能授权已失效**
 
-            抓取选词需要模拟 ⌘C。请到 系统设置 → 隐私与安全 → 辅助功能 勾选 ClickToKnow（菜单栏「辅助功能权限」条目可直达），授权后重试。
-            """
+                系统设置里仍列着 ClickToKnow，但覆盖安装改变了应用签名，旧授权不再匹配当前程序。
+                打开「设置 → 状态总览」点「修复授权」（菜单栏的「辅助功能权限」条目也可直接修复）会重建授权记录；
+                若仍不生效，请在列表中先关闭再打开开关，或移除条目后重新添加。
+                """
+            } else {
+                message = """
+                **未获得辅助功能权限**
+
+                抓取选词需要模拟 ⌘C。请到 系统设置 → 隐私与安全 → 辅助功能 勾选 ClickToKnow（菜单栏「辅助功能权限」条目可直达）。
+                若列表里已经勾选却仍不可用（覆盖安装后常见），打开「设置 → 状态总览」点「修复授权」重建授权记录。
+                """
+            }
         case .secureInputActive:
             message = """
             **已跳过本次查询**
@@ -191,8 +205,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover?.show(MarkdownRenderer.render(hint), at: location)
     }
 
-    /// 首次启动弹系统授权框（AX 直读与模拟 ⌘C 都依赖辅助功能权限）
+    /// 首次启动弹系统授权框（AX 直读与模拟 ⌘C 都依赖辅助功能权限）。
+    /// 授权因覆盖安装签名变更而失效时不弹框：系统只会把用户引到一个已经勾选的开关上，
+    /// 正确入口是状态页 / 菜单栏的「修复授权」。
     private func requestAccessibilityIfNeeded() {
+        guard statusModel.accessibilityState != .invalidated else {
+            Log.app.warning("辅助功能授权已因签名变更失效，可在状态总览点「修复授权」重建")
+            return
+        }
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         if !AXIsProcessTrustedWithOptions(opts) {
             Log.app.warning("需要辅助功能权限：系统设置 → 隐私与安全 → 辅助功能，勾选本程序后重启")

@@ -46,7 +46,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(hotkeyItem)
 
         permissionItem.target = self
-        permissionItem.action = #selector(openAccessibilitySettings(_:))
+        permissionItem.action = #selector(handlePermissionItem(_:))
         menu.addItem(permissionItem)
 
         pauseItem.target = self
@@ -98,9 +98,14 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private func refreshDynamicItems() {
         statusModel.refresh()
         hotkeyItem.title = "快捷键：\(statusModel.hotKeyBinding.displayString)（先选中文字）"
-        permissionItem.title = statusModel.accessibilityGranted
-            ? "辅助功能权限：已授权 ✓"
-            : "辅助功能权限：未授权 — 去授权"
+        switch statusModel.accessibilityState {
+        case .granted:
+            permissionItem.title = "辅助功能权限：已授权 ✓"
+        case .notGranted:
+            permissionItem.title = "辅助功能权限：未授权 — 去授权"
+        case .invalidated:
+            permissionItem.title = "辅助功能权限：已失效（覆盖安装后签名变更）— 点此修复"
+        }
         pauseItem.state = statusModel.hotKeyPaused ? .on : .off
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
     }
@@ -119,9 +124,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// 直达系统设置的辅助功能面板（选词靠模拟 ⌘C，未授权则抓不到文本）
-    @objc private func openAccessibilitySettings(_ sender: Any?) {
-        SystemSettingsOpener.openAccessibility()
+    /// 权限条目：失效态就地修复（重置 TCC 条目后重新授权），其余情况直达系统设置面板
+    @objc private func handlePermissionItem(_ sender: Any?) {
+        if statusModel.accessibilityState == .invalidated {
+            statusModel.repairAccessibilityPermission()
+        } else {
+            SystemSettingsOpener.openAccessibility()
+        }
     }
 
     /// 暂停/恢复取词：实际注销/重注册由 SelectionMonitor 完成，勾选态下次展开菜单时刷新
