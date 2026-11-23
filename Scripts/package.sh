@@ -63,27 +63,40 @@ if [ -z "${DEVELOPER_DIR:-}" ] && [ -d "/Applications/Xcode.app" ]; then
 fi
 
 ARCHS="${ARCHS:-arm64 x86_64}"
+SLICE_DIR=".build/universal-slices"
+
+# 查询某架构真实的产物目录：不能写死 .build/release，它只是指向「最近一次构建架构」
+# 目录的符号链接（如 .build/arm64-apple-macosx/release），换架构构建后会被重新指向，
+# 之前放进该路径的切片文件随之「消失」（lipo 报 can't open input file）。
+bin_dir() {
+    # shellcheck disable=SC2086
+    swift build -c release --arch "$1" ${SWIFT_BUILD_ARGS:-} --show-bin-path | tail -n 1
+}
 
 echo "==> 1/6 release 构建（archs: ${ARCHS}）"
-# shellcheck disable=SC2086
 if [ "$(echo "$ARCHS" | wc -w | tr -d ' ')" = "1" ]; then
-    # 单架构：直接构建，产物在 .build/release/
+    # 单架构：直接构建
+    # shellcheck disable=SC2086
     swift build -c release --arch "$ARCHS" ${SWIFT_BUILD_ARGS:-}
-    BIN=".build/release/$APP_NAME"
+    BIN="$(bin_dir "$ARCHS")/$APP_NAME"
 else
-    # 多架构：逐架构构建后用 lipo 合并为 universal binary
-    # （每个架构的 .build/release 产物会被下一次构建覆盖，先移开收集）
+    # 多架构：逐架构构建后用 lipo 合并为 universal binary。
+    # 切片统一放在 .build/universal-slices，不受 .build/release 符号链接切换影响
+    rm -rf "$SLICE_DIR"
+    mkdir -p "$SLICE_DIR"
     SLICES=()
     for ARCH in $ARCHS; do
         # shellcheck disable=SC2086
         swift build -c release --arch "$ARCH" ${SWIFT_BUILD_ARGS:-}
-        SLICE=".build/release/$APP_NAME-$ARCH"
-        mv ".build/release/$APP_NAME" "$SLICE"
+        PRODUCT="$(bin_dir "$ARCH")/$APP_NAME"
+        [ -f "$PRODUCT" ] || { echo "未找到 $ARCH 架构的构建产物：$PRODUCT" >&2; exit 1; }
+        SLICE="$SLICE_DIR/$APP_NAME-$ARCH"
+        cp -f "$PRODUCT" "$SLICE"
         SLICES+=("$SLICE")
+        echo "    $ARCH 切片：$(lipo -archs "$SLICE")"
     done
-    BIN=".build/release/$APP_NAME"
+    BIN="$SLICE_DIR/$APP_NAME"
     lipo -create -output "$BIN" "${SLICES[@]}"
-    rm -f "${SLICES[@]}"
     echo "    universal binary 架构：$(lipo -archs "$BIN")"
 fi
 [ -f "$BIN" ] || { echo "未找到构建产物 $BIN" >&2; exit 1; }
