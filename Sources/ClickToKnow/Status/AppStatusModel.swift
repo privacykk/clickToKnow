@@ -17,15 +17,44 @@ final class AppStatusModel: ObservableObject {
     @Published private(set) var hotKeyPaused = false
     /// LLM 是否可用（未配置时走系统词典兜底）
     @Published private(set) var llmReady = false
-    /// 当前生效的模型名；空串 = 未配置 LLM，走系统词典兜底
+    /// LLM 细分配置状态：未配置 / 已配置但缺密钥 / 可用（状态总览与「大模型」页共用）
+    @Published private(set) var llmStatus: AppConfig.LLMStatus = .notConfigured
+    /// 当前生效的模型名；空串 = 尚无配置
     @Published private(set) var activeModel = ""
+    /// 当前生效配置的端点（未配置为空串）
+    @Published private(set) var activeBaseURL = ""
+    /// 当前生效配置的协议名（未配置为空串）
+    @Published private(set) var activeProtocolName = ""
+    /// 已保存的 API 配置数量（0 = 从未配置过）
+    @Published private(set) var profileCount = 0
     /// 密钥实际来源（环境/钥匙串/遗留明文/无）
     @Published private(set) var keySource: AppConfig.APIKeySource = .none
     /// 掩码后的密钥（未配置为 nil）
     @Published private(set) var maskedKey: String?
 
+    /// LLM 配置变更监听：任意页面保存/切换/删除配置后立即刷新，两页状态不会再各说各话
+    private var llmConfigObserver: NSObjectProtocol?
+
     /// 读取热键真实注册状态；AppDelegate 装配完成后注入
     weak var selectionMonitor: SelectionMonitor?
+
+    init() {
+        llmConfigObserver = NotificationCenter.default.addObserver(
+            forName: AppConfig.llmConfigChangedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.refresh()
+            }
+        }
+    }
+
+    deinit {
+        if let llmConfigObserver {
+            NotificationCenter.default.removeObserver(llmConfigObserver)
+        }
+    }
 
     /// 打包成 .app 时读 Info.plist 的 CFBundleShortVersionString（由 Scripts/package.sh 注入）；
     /// 裸可执行（swift run）没有 bundle 信息，回退 dev 标识
@@ -67,12 +96,24 @@ final class AppStatusModel: ObservableObject {
         可执行路径：\(executablePath)
         辅助功能权限：\(accessibilityGranted ? "已授权" : "未授权")
         快捷键：\(hotKeyBinding.displayString)（\(hotKeyPaused ? "已暂停" : (hotKeyRegistered ? "已注册" : "注册失败"))）
-        释义来源：\(llmReady ? "大模型 · \(activeModel)" : "系统词典（未配置 LLM）")
+        释义来源：\(llmDiagnosticSummary)
         API Key：\(maskedKey ?? "未配置")（来源：\(keySource.rawValue)）
         开机自启：\(SMAppService.mainApp.status == .enabled ? "已开启" : "未开启")
         历史记录：\(HistoryStore.shared.entries.count) 条
         取词路径：AX 直读优先，⌘C 兜底
         """
+    }
+
+    /// 诊断报告里的释义来源一句话（区分「未配置」与「已配置但缺密钥」）
+    private var llmDiagnosticSummary: String {
+        switch llmStatus {
+        case .ready:
+            return "大模型 · \(activeModel)"
+        case .missingKey:
+            return "已配置「\(activeModel)」但缺少 API Key（当前回落系统词典）"
+        case .notConfigured:
+            return "系统词典（未配置 LLM）"
+        }
     }
 
     /// 幂等全量拉取：轮询、菜单展开、Tab 切入、保存配置后都会调用。
@@ -91,8 +132,12 @@ final class AppStatusModel: ObservableObject {
             hotKeyPaused = false
         }
 
-        llmReady = config.hasLLMConfig
-        activeModel = llmReady ? config.model : ""
+        llmStatus = config.llmStatus
+        llmReady = llmStatus == .ready
+        activeModel = config.activeProfile?.model ?? ""
+        activeBaseURL = config.baseURL
+        activeProtocolName = config.activeProfile?.apiProtocol.displayName ?? ""
+        profileCount = config.apiProfiles.count
         keySource = config.apiKeySource
         maskedKey = config.maskedAPIKey
     }

@@ -9,9 +9,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let statusModel: AppStatusModel
 
     /// 固定内容尺寸：窗口与 SwiftUI 宿主视图共用同一来源，避免两处硬编码漂移。
-    /// 高度取 560 而非设计稿的 520：macOS 26+ 的 TabView 会把页签条嵌在内容区顶部（约占 30pt），
-    /// 520 会裁掉「状态总览」最后一行（可执行路径），560 可一屏放完。
-    private static let contentSize = NSSize(width: 560, height: 560)
+    /// 高度取 600：macOS 26+ 的 TabView 会把页签条嵌在内容区顶部（约占 30pt），
+    /// 状态总览新增「一句话结论 + 直达按钮」后需要更多纵向空间，600 可一屏放完。
+    private static let contentSize = NSSize(width: 560, height: 600)
 
     init(statusModel: AppStatusModel) {
         self.statusModel = statusModel

@@ -38,4 +38,50 @@ final class AppConfigLLMReadyTests: XCTestCase {
         XCTAssertFalse(AppConfig.isLLMReady(baseURL: deepseekURL, apiKey: "sk-x", model: ""))
         XCTAssertFalse(AppConfig.isLLMReady(baseURL: ollamaURL, apiKey: "", model: ""))
     }
+
+    // MARK: - llmStatus：区分「未配置」与「配置了但缺密钥」
+
+    /// 端点或模型缺失 = 未配置（状态页应引导去添加配置）
+    func test_status_withoutEndpointOrModel_isNotConfigured() {
+        XCTAssertEqual(
+            AppConfig.llmStatus(baseURL: "", apiKey: "sk-x", model: "deepseek-chat"),
+            .notConfigured
+        )
+        XCTAssertEqual(
+            AppConfig.llmStatus(baseURL: deepseekURL, apiKey: "sk-x", model: ""),
+            .notConfigured
+        )
+        XCTAssertEqual(
+            AppConfig.llmStatus(baseURL: "   ", apiKey: "sk-x", model: "deepseek-chat"),
+            .notConfigured
+        )
+    }
+
+    /// 回归：已保存完整配置但漏填密钥时，必须报「缺密钥」而不是「未配置」
+    func test_status_keyedProviderWithoutKey_isMissingKey() {
+        XCTAssertEqual(
+            AppConfig.llmStatus(baseURL: deepseekURL, apiKey: "", model: "deepseek-flash"),
+            .missingKey
+        )
+    }
+
+    func test_status_keyedProviderWithKey_isReady() {
+        XCTAssertEqual(
+            AppConfig.llmStatus(baseURL: deepseekURL, apiKey: "sk-x", model: "deepseek-chat"),
+            .ready
+        )
+    }
+
+    /// 密钥可选预设（Ollama 本地）空密钥也视为就绪，与 hasLLMConfig 口径一致
+    func test_status_ollamaWithoutKey_isReady() {
+        XCTAssertEqual(AppConfig.llmStatus(baseURL: ollamaURL, apiKey: "", model: "qwen2.5"), .ready)
+    }
+
+    /// 判定前忽略首尾空白，避免手输多一个空格就被判成未配置
+    func test_status_trimsWhitespaceBeforeJudging() {
+        XCTAssertEqual(
+            AppConfig.llmStatus(baseURL: " \(deepseekURL) ", apiKey: "sk-x", model: " deepseek-chat "),
+            .ready
+        )
+    }
 }

@@ -8,6 +8,10 @@ final class AppConfig {
     /// 快捷键绑定持久化后广播；AppDelegate 监听以刷新状态、菜单栏展示最新绑定
     static let hotKeyBindingChangedNotification = Notification.Name("ctkHotKeyBindingChanged")
 
+    /// LLM 配置（配置列表 / 生效项 / 密钥）变更后广播；
+    /// AppStatusModel 监听后立即刷新，保证「大模型」与「状态总览」两页永远同一口径
+    static let llmConfigChangedNotification = Notification.Name("ctkLLMConfigChanged")
+
     private let defaults: UserDefaults
 
     private init() {
@@ -41,6 +45,22 @@ final class AppConfig {
         case none
     }
 
+    /// LLM 可用性三态：区分「没配置」与「配置了但还差密钥」，
+    /// 避免已保存配置却只显示「未配置」、用户不知道差在哪一步。
+    enum LLMStatus: Equatable {
+        /// 没有任何 API 配置，或生效配置缺少端点/模型
+        case notConfigured
+        /// 已有完整配置，但缺少该供应商必需的 API Key（划词会回落系统词典）
+        case missingKey
+        /// 配置完整，划词走大模型
+        case ready
+    }
+
+    /// 配置任一要素变更后广播（列表增删、切换生效项、密钥写入/清除都会触发）
+    private func notifyLLMConfigChanged() {
+        NotificationCenter.default.post(name: Self.llmConfigChangedNotification, object: nil)
+    }
+
     // MARK: - 已配置的 API（多配置）
 
     /// 已保存的 API 配置列表（JSON 持久化）。密钥不在其中：按 profile id 分 account 存钥匙串。
@@ -49,13 +69,19 @@ final class AppConfig {
             guard let data = defaults.data(forKey: Key.apiProfiles) else { return [] }
             return (try? JSONDecoder().decode([APIProfile].self, from: data)) ?? []
         }
-        set { defaults.set(try? JSONEncoder().encode(newValue), forKey: Key.apiProfiles) }
+        set {
+            defaults.set(try? JSONEncoder().encode(newValue), forKey: Key.apiProfiles)
+            notifyLLMConfigChanged()
+        }
     }
 
     /// 当前生效配置的 id（无选中/未设置时为 nil，activeProfile 会回退列表首项）
     var activeProfileID: UUID? {
         get { defaults.string(forKey: Key.activeProfileID).flatMap(UUID.init(uuidString:)) }
-        set { defaults.set(newValue?.uuidString, forKey: Key.activeProfileID) }
+        set {
+            defaults.set(newValue?.uuidString, forKey: Key.activeProfileID)
+            notifyLLMConfigChanged()
+        }
     }
 
     /// 当前生效配置：显式选中优先；选中项被删/数据损坏时回退列表第一项，避免莫名静默失能
@@ -131,6 +157,7 @@ final class AppConfig {
             succeeded = KeychainSecretStore.delete() && succeeded
             defaults.removeObject(forKey: Key.apiKey)
         }
+        notifyLLMConfigChanged()
         return succeeded
     }
 
@@ -177,14 +204,36 @@ final class AppConfig {
     /// 密钥为空时仅当 Base URL 命中「密钥可选」预设（如 Ollama 本地）才视为可用，
     /// 否则静默回落系统词典会让「Ollama 免密钥」名存实亡。
     var hasLLMConfig: Bool {
-        Self.isLLMReady(baseURL: baseURL, apiKey: apiKey, model: model)
+        Self.llmStatus(baseURL: baseURL, apiKey: apiKey, model: model) == .ready
+    }
+
+    /// 生效配置的细分可用性（状态总览与「大模型」页共用，保证两页口径一致）
+    var llmStatus: LLMStatus {
+        guard let profile = activeProfile else { return .notConfigured }
+        return Self.llmStatus(baseURL: profile.baseURL, apiKey: apiKey, model: profile.model)
+    }
+
+    /// 指定配置的可用性：判定规则与生效配置完全一致，列表行据此展示「可用 / 缺少密钥」
+    func llmStatus(for profile: APIProfile) -> LLMStatus {
+        Self.llmStatus(
+            baseURL: profile.baseURL,
+            apiKey: effectiveAPIKey(for: profile),
+            model: profile.model
+        )
+    }
+
+    /// 纯函数版判定：先查端点/模型是否齐备，再看密钥（密钥可选预设放行空密钥）
+    static func llmStatus(baseURL: String, apiKey: String, model: String) -> LLMStatus {
+        let url = baseURL.trimmingCharacters(in: .whitespaces)
+        let name = model.trimmingCharacters(in: .whitespaces)
+        guard !url.isEmpty, !name.isEmpty else { return .notConfigured }
+        if !apiKey.isEmpty { return .ready }
+        return ProviderPresets.matching(baseURL: url)?.apiKeyOptional == true ? .ready : .missingKey
     }
 
     /// 纯函数版判定，供单元测试（apiKey 读取链涉及环境变量/钥匙串，不便于测试隔离）
     static func isLLMReady(baseURL: String, apiKey: String, model: String) -> Bool {
-        guard !baseURL.isEmpty, !model.isEmpty else { return false }
-        if !apiKey.isEmpty { return true }
-        return ProviderPresets.matching(baseURL: baseURL)?.apiKeyOptional ?? false
+        llmStatus(baseURL: baseURL, apiKey: apiKey, model: model) == .ready
     }
 
     /// 生效配置的掩码密钥（前4后4，如 sk-a••••3456）；未配置密钥时为 nil。UI/日志一律不回显完整密钥。
@@ -212,13 +261,38 @@ final class AppConfig {
             // 默认 account 与明文属于同一生效配置（单配置时代遗留），一并清除避免旧值复活
             let legacyDeleted = KeychainSecretStore.delete()
             defaults.removeObject(forKey: Key.apiKey)
+            notifyLLMConfigChanged()
             return profileDeleted && legacyDeleted
         }
-        if KeychainSecretStore.save(value, account: account) {
+        let savedToKeychain = KeychainSecretStore.save(value, account: account)
+        if savedToKeychain {
             defaults.removeObject(forKey: Key.apiKey) // 同步移除遗留明文，保持单一事实来源
+        } else {
+            defaults.set(value, forKey: Key.apiKey)
+        }
+        notifyLLMConfigChanged()
+        return savedToKeychain
+    }
+
+    /// 为指定配置写入密钥（编辑非生效配置时用，避免误写到当前生效项）。
+    /// 钥匙串写入失败时只有生效配置能回退本地明文；非生效配置无法安全保存，返回 false 由 UI 如实提示。
+    @discardableResult
+    func setAPIKey(_ value: String, for profile: APIProfile) -> Bool {
+        guard !value.isEmpty else { return clearAPIKey(for: profile) }
+        let isActive = activeProfile?.id == profile.id
+        if KeychainSecretStore.save(value, account: Self.keychainAccount(for: profile.id)) {
+            if isActive {
+                defaults.removeObject(forKey: Key.apiKey) // 同步移除遗留明文，保持单一事实来源
+            }
+            notifyLLMConfigChanged()
             return true
         }
+        guard isActive else {
+            Log.config.warning("非生效配置的密钥写入钥匙串失败，已放弃保存（回退明文只会存到当前生效配置）")
+            return false
+        }
         defaults.set(value, forKey: Key.apiKey)
+        notifyLLMConfigChanged()
         return false
     }
 
