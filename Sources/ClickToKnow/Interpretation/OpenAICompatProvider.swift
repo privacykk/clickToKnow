@@ -9,6 +9,7 @@ final class OpenAICompatProvider: StreamingInterpretationProvider, LLMPinging {
     private let config: Config
     private let session: URLSession
 
+    /// session 可注入，便于测试替换为本地 stub
     init(config: Config, session: URLSession = LLMProviderSupport.makeSession()) {
         self.config = config
         self.session = session
@@ -90,6 +91,7 @@ final class OpenAICompatProvider: StreamingInterpretationProvider, LLMPinging {
         return Self.makeResult(term: text, raw: accumulated)
     }
 
+    /// 统一收尾：清洗并封装为释义结果（流式/非流式共用）
     private static func makeResult(term: String, raw: String) -> Interpretation {
         Interpretation(
             term: term,
@@ -98,6 +100,7 @@ final class OpenAICompatProvider: StreamingInterpretationProvider, LLMPinging {
         )
     }
 
+    /// 构造 chat/completions 请求：Bearer 鉴权，system + user 两条消息，stream 按路径开关
     private func makeChatRequest(text: String, context: String?, stream: Bool) throws -> URLRequest {
         guard let url = chatCompletionsURL else {
             throw InterpretationError.badConfiguration
@@ -159,12 +162,14 @@ final class OpenAICompatProvider: StreamingInterpretationProvider, LLMPinging {
         return latency
     }
 
+    /// 端点拼接：剥尾部斜杠后追加 /chat/completions；无 scheme 视为非法配置
     private var chatCompletionsURL: URL? {
         let base = config.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard base.hasPrefix("http://") || base.hasPrefix("https://") else { return nil }
         return URL(string: base + "/chat/completions")
     }
 
+    /// chat/completions 非流式响应模型
     private struct ChatResponse: Decodable {
         struct Choice: Decodable {
             struct Message: Decodable { let content: String }

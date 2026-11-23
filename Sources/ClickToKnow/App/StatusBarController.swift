@@ -6,6 +6,7 @@ import ServiceManagement
 final class StatusBarController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let statusModel: AppStatusModel
+    /// 设置窗口控制器（懒创建复用）
     private var settingsWindowController: SettingsWindowController?
 
     /// 动态条目：menuWillOpen 时先拉最新状态再回填 title
@@ -14,6 +15,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private let pauseItem = NSMenuItem(title: "暂停取词", action: nil, keyEquivalent: "")
     private let loginItem = NSMenuItem(title: "开机自启", action: nil, keyEquivalent: "")
     private let historyItem = NSMenuItem(title: "历史记录…", action: nil, keyEquivalent: "")
+    /// 历史窗口控制器（懒创建复用）
     private var historyWindowController: HistoryWindowController?
 
     /// 「暂停取词」开关回调：AppDelegate 注入，转发给 SelectionMonitor（勾选态来自 statusModel.hotKeyPaused）
@@ -26,6 +28,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         setupMenu()
     }
 
+    /// 构建菜单栏图标与完整菜单
     private func setupMenu() {
         if let button = statusItem.button {
             let image = NSImage(
@@ -86,10 +89,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     // MARK: - NSMenuDelegate
 
+    /// 菜单即将展开：刷新动态条目（快捷键/权限/勾选态取实时值）
     func menuWillOpen(_ menu: NSMenu) {
         refreshDynamicItems()
     }
 
+    /// 回填动态条目文案与勾选态
     private func refreshDynamicItems() {
         statusModel.refresh()
         hotkeyItem.title = "快捷键：\(statusModel.hotKeyBinding.displayString)（先选中文字）"

@@ -3,7 +3,9 @@ import XCTest
 
 @testable import ClickToKnow
 
+/// CarbonKeyTranslator 纯函数的行为验证：默认绑定、展示顺序、键名回退、修饰键映射与校验。
 final class CarbonKeyTranslatorTests: XCTestCase {
+    /// 默认绑定应显示为 ⌥⌘K
     func testDefaultBindingDisplaysOptionCommandK() {
         XCTAssertEqual(CarbonKeyTranslator.defaultBinding.displayString, "⌥⌘K")
     }

@@ -7,8 +7,10 @@ final class GlobalHotKey {
     private var handlerRef: EventHandlerRef?
     private var action: (() -> Void)?
 
+    /// 是否已成功注册（供热键更换流程判断）
     var isRegistered: Bool { hotKeyRef != nil }
 
+    /// 注册全局热键；重复注册前先注销旧绑定。返回是否成功（冲突等失败不抛错）。
     @discardableResult
     func register(keyCode: UInt32, modifiers: UInt32, action: @escaping () -> Void) -> Bool {
         unregister()
@@ -59,6 +61,7 @@ final class GlobalHotKey {
         return true
     }
 
+    /// 注销热键与事件处理器（幂等；应用退出或更换绑定前调用）
     func unregister() {
         if let ref = hotKeyRef {
             UnregisterEventHotKey(ref)

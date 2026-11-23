@@ -2,9 +2,13 @@ import Foundation
 
 /// 预设的大模型供应商：一键填充 Base URL、API 协议并给出推荐模型。
 struct ProviderPreset: Identifiable, Equatable {
+    /// 预设稳定标识（如 "deepseek"），「自定义」用 ProviderPresets.customID
     let id: String
+    /// UI 上显示的供应商名称
     let name: String
+    /// 该供应商官方 API 端点根地址
     let baseURL: String
+    /// 推荐填入的模型名（用户可改）
     let suggestedModels: [String]
     /// Ollama 本地服务通常无鉴权，密钥可留空
     let apiKeyOptional: Bool
@@ -12,9 +16,12 @@ struct ProviderPreset: Identifiable, Equatable {
     let apiProtocol: APIProtocol
 }
 
+/// 内置预设集合 + Base URL 反查。
 enum ProviderPresets {
+    /// 「自定义」预设的保留 id；匹配不到任何预设时 UI 落到该项
     static let customID = "custom"
 
+    /// 内置预设列表；末尾固定为「自定义」项（空端点，仅作 UI 占位）
     static let all: [ProviderPreset] = [
         .init(id: "deepseek", name: "DeepSeek",
               baseURL: "https://api.deepseek.com",

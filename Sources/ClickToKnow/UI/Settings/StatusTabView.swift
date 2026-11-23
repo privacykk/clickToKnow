@@ -80,6 +80,7 @@ struct StatusTabView: View {
         return statusModel.hotKeyRegistered ? .ok : .bad
     }
 
+    /// 热键徽标文案（与等级联动）
     private var hotKeyBadgeText: String {
         if statusModel.hotKeyPaused { return "已暂停（菜单栏可恢复）" }
         return statusModel.hotKeyRegistered ? "已注册" : "注册失败"

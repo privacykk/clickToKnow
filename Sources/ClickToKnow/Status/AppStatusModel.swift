@@ -7,15 +7,21 @@ import ServiceManagement
 /// 只负责「读状态 + 轮询生命周期」，不修改任何配置；轮询 Timer 仅在监控开启期间存在。
 @MainActor
 final class AppStatusModel: ObservableObject {
+    /// 辅助功能是否已授权
     @Published private(set) var accessibilityGranted = false
+    /// 当前生效快捷键绑定
     @Published private(set) var hotKeyBinding = CarbonKeyTranslator.defaultBinding
+    /// 热键是否注册成功
     @Published private(set) var hotKeyRegistered = false
     /// 取词已暂停（菜单栏开关）：此时 hotKeyRegistered 必为 false，展示层应优先显示「已暂停」而非「注册失败」
     @Published private(set) var hotKeyPaused = false
+    /// LLM 是否可用（未配置时走系统词典兜底）
     @Published private(set) var llmReady = false
     /// 当前生效的模型名；空串 = 未配置 LLM，走系统词典兜底
     @Published private(set) var activeModel = ""
+    /// 密钥实际来源（环境/钥匙串/遗留明文/无）
     @Published private(set) var keySource: AppConfig.APIKeySource = .none
+    /// 掩码后的密钥（未配置为 nil）
     @Published private(set) var maskedKey: String?
 
     /// 读取热键真实注册状态；AppDelegate 装配完成后注入
@@ -45,6 +51,7 @@ final class AppStatusModel: ObservableObject {
         }
     }
 
+    /// 关闭 1s 轮询（窗口关闭 / 状态 Tab 消失时调用）
     func stopMonitoring() {
         pollTimer?.invalidate()
         pollTimer = nil
@@ -90,6 +97,7 @@ final class AppStatusModel: ObservableObject {
         maskedKey = config.maskedAPIKey
     }
 
+    /// 解析当前进程可执行文件路径（解析符号链接后的真实路径）
     private static func resolveExecutablePath() -> String {
         var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
         var size = UInt32(buffer.count)

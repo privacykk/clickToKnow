@@ -7,9 +7,12 @@ import SwiftUI
 struct HotKeyRecorderField: NSViewRepresentable {
     /// 非录制态展示的占位文案（当前绑定显示串）
     let placeholder: String
+    /// 捕获到合法组合时回调（已通过修饰键校验）
     var onCapture: (HotKeyBinding) -> Void
+    /// Esc 取消录制时回调
     var onCancel: () -> Void = {}
 
+    /// 创建底层录制视图并同步回调
     func makeNSView(context: Context) -> RecorderView {
         let view = RecorderView()
         view.placeholder = placeholder
@@ -18,6 +21,7 @@ struct HotKeyRecorderField: NSViewRepresentable {
         return view
     }
 
+    /// SwiftUI 更新时同步回调与占位文案（闭包每次重建，需无条件刷新）
     func updateNSView(_ nsView: RecorderView, context: Context) {
         nsView.onCapture = onCapture
         nsView.onCancel = onCancel
@@ -29,6 +33,7 @@ struct HotKeyRecorderField: NSViewRepresentable {
     final class RecorderView: NSView {
         var onCapture: ((HotKeyBinding) -> Void)?
         var onCancel: (() -> Void)?
+        /// 占位文案（变化即重绘）
         var placeholder: String = "" {
             didSet { needsDisplay = true }
         }
@@ -40,6 +45,7 @@ struct HotKeyRecorderField: NSViewRepresentable {
 
         override var acceptsFirstResponder: Bool { true }
 
+        /// 点击进入录制态（夺取 first responder）
         override func mouseDown(with event: NSEvent) {
             window?.makeFirstResponder(self)
         }
@@ -54,6 +60,7 @@ struct HotKeyRecorderField: NSViewRepresentable {
             return super.resignFirstResponder()
         }
 
+        /// 键盘捕获：Esc 取消；Tab 放行给焦点导航；非法组合 beep；合法组合回调 onCapture
         override func keyDown(with event: NSEvent) {
             if event.keyCode == UInt16(kVK_Escape) {
                 window?.makeFirstResponder(nil)
@@ -78,6 +85,7 @@ struct HotKeyRecorderField: NSViewRepresentable {
             onCapture?(HotKeyBinding(keyCode: UInt32(event.keyCode), carbonModifiers: modifiers))
         }
 
+        /// 自绘：录制态用强调色粗边框，居中显示提示/占位文案
         override func draw(_ dirtyRect: NSRect) {
             let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6)
             NSColor.controlBackgroundColor.setFill()

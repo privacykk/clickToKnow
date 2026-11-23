@@ -5,6 +5,7 @@ import Foundation
 struct ModelCatalogFetcher {
     private let session: URLSession
 
+    /// session 可注入，便于测试替换为本地 stub
     init(session: URLSession = LLMProviderSupport.makeSession()) {
         self.session = session
     }
@@ -46,6 +47,7 @@ struct ModelCatalogFetcher {
         return try parse(data: data, apiProtocol: apiProtocol)
     }
 
+    /// 各协议的模型列表端点（差异只在 Anthropic 需补 /v1 前缀）
     private func endpoint(base: String, apiProtocol: APIProtocol) -> URL {
         switch apiProtocol {
         // Anthropic 的 baseURL 不带 /v1（与 Messages 的拼接口径一致），其余 baseURL 自带版本段
@@ -54,6 +56,7 @@ struct ModelCatalogFetcher {
         }
     }
 
+    /// 按协议解析响应并归一化（去重 + 字典序排序）
     private func parse(data: Data, apiProtocol: APIProtocol) throws -> [String] {
         let ids: [String]
         switch apiProtocol {
@@ -72,6 +75,7 @@ struct ModelCatalogFetcher {
         return Array(Set(ids.filter { !$0.isEmpty })).sorted()
     }
 
+    /// JSON 解码：失败统一归为 badResponse
     private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         do {
             return try JSONDecoder().decode(type, from: data)
@@ -80,11 +84,13 @@ struct ModelCatalogFetcher {
         }
     }
 
+    /// OpenAI/Anthropic 共用的模型列表响应：{"data":[{"id":...}]}
     private struct IDList: Decodable {
         struct Entry: Decodable { let id: String }
         let data: [Entry]
     }
 
+    /// Gemini 模型列表响应：models[].name 形如 "models/gemini-2.5-flash"
     private struct GeminiModelList: Decodable {
         struct Entry: Decodable {
             let name: String

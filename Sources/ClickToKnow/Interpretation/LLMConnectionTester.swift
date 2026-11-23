@@ -3,11 +3,13 @@ import Foundation
 /// 面向设置页的连接测试门面：输入表单当前值，输出可直接展示的分类结果。
 /// 走最小 chat/completions 对话而非 GET /models：能同时验证模型名可访问（最常见的配置错误）。
 struct LLMConnectionTester {
+    /// 测试结果：成功带毫秒延迟；失败带可直接展示的中文原因
     enum Result: Equatable {
         case success(latencyMs: Int)
         case failure(reason: String)
     }
 
+    /// Provider 工厂闭包（可注入替换以便单测）
     private let makeProvider: (LLMEndpointConfig, APIProtocol) -> any LLMPinging
 
     /// makeProvider 可注入，单测借此替换为 URLProtocol mock 的 session

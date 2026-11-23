@@ -7,6 +7,7 @@ final class ClipboardManager {
     private var backup: [NSPasteboardItem] = []
     private var hasBackup = false
 
+    /// 当前剪贴板写入计数（每次写入自增），用作"复制是否生效"的基线对比
     var changeCount: Int { NSPasteboard.general.changeCount }
 
     /// 保存剪贴板快照，返回基线 changeCount（供轮询判断复制是否生效）。
@@ -17,6 +18,7 @@ final class ClipboardManager {
         return pb.changeCount
     }
 
+    /// 读取剪贴板纯文本（模拟 ⌘C 后取词的唯一数据源）
     func readText() -> String? {
         NSPasteboard.general.string(forType: .string)
     }

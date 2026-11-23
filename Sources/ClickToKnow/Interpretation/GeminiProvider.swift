@@ -9,6 +9,7 @@ final class GeminiProvider: InterpretationProvider, LLMPinging {
     private let config: Config
     private let session: URLSession
 
+    /// session 可注入，便于测试替换为本地 stub
     init(config: Config, session: URLSession = LLMProviderSupport.makeSession()) {
         self.config = config
         self.session = session
@@ -56,6 +57,7 @@ final class GeminiProvider: InterpretationProvider, LLMPinging {
         return Date().timeIntervalSince(start)
     }
 
+    /// 发送请求并做过错归类；timeout 传 nil 用 session 默认（20s），ping 显式压到 15s
     private func send(body: [String: Any], timeout: TimeInterval?) async throws -> Data {
         guard let url = generateContentURL else {
             throw InterpretationError.badConfiguration
@@ -86,6 +88,7 @@ final class GeminiProvider: InterpretationProvider, LLMPinging {
         return data
     }
 
+    /// 端点拼接：剥尾部斜杠后追加 /models/{model}:generateContent；URL 需对 model 做合法字符校验由 URL(string:) 兜底
     private var generateContentURL: URL? {
         let base = config.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard base.hasPrefix("http://") || base.hasPrefix("https://") else { return nil }
@@ -94,6 +97,7 @@ final class GeminiProvider: InterpretationProvider, LLMPinging {
         return URL(string: "\(base)/models/\(model):generateContent")
     }
 
+    /// generateContent 响应模型：candidates 可为空（如输出被 MAX_TOKENS 截断）
     private struct GenerateContentResponse: Decodable {
         struct Candidate: Decodable {
             struct Content: Decodable {

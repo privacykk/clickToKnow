@@ -9,6 +9,7 @@ final class AnthropicProviderTests: XCTestCase {
         super.tearDown()
     }
 
+    /// 构造走 MockURLProtocol 的被测 Provider
     private func makeProvider() -> AnthropicProvider {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
@@ -18,6 +19,7 @@ final class AnthropicProviderTests: XCTestCase {
         )
     }
 
+    /// 构造指定状态码的 HTTP 响应（mock responder 用）
     private func httpResponse(status: Int, url: URL) -> HTTPURLResponse {
         HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
     }

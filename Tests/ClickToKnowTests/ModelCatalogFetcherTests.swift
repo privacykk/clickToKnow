@@ -9,16 +9,19 @@ final class ModelCatalogFetcherTests: XCTestCase {
         super.tearDown()
     }
 
+    /// 构造走 MockURLProtocol 的被测 Fetcher
     private func makeFetcher() -> ModelCatalogFetcher {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
         return ModelCatalogFetcher(session: URLSession(configuration: configuration))
     }
 
+    /// 构造指定状态码的 HTTP 响应（mock responder 用）
     private func httpResponse(status: Int, url: URL) -> HTTPURLResponse {
         HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
     }
 
+    /// 设置 mock 响应体与状态码（默认 200）
     private func respond(_ body: String, status: Int = 200) {
         MockURLProtocol.responder = { request in
             (self.httpResponse(status: status, url: request.url!), Data(body.utf8))

@@ -6,7 +6,9 @@ import SwiftUI
 struct HotKeyTabView: View {
     @EnvironmentObject private var statusModel: AppStatusModel
 
+    /// 修改失败的提示文案
     @State private var errorMessage: String?
+    /// 修改成功的提示文案
     @State private var successMessage: String?
 
     var body: some View {

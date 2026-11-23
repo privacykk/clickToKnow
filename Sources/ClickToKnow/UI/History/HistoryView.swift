@@ -5,8 +5,11 @@ import SwiftUI
 /// 数据源是 HistoryStore.shared（查询成功时写入），窗口打开时重新拉取。
 @MainActor
 struct HistoryView: View {
+    /// 本地镜像列表：窗口出现时从 HistoryStore.shared 拉取一次
     @State private var entries: [HistoryEntry] = []
+    /// 左列表当前选中条目 id
     @State private var selection: HistoryEntry.ID?
+    /// 操作结果提示（导出成功/失败、清空）
     @State private var notice: String?
 
     var body: some View {
@@ -57,9 +60,11 @@ struct HistoryView: View {
         .onAppear { entries = HistoryStore.shared.entries }
     }
 
+    /// 导出格式：CSV 通用 / Anki TSV 可直接导入 Anki
     private enum ExportFormat {
         case csv, anki
 
+        /// 保存面板默认文件名
         var fileName: String {
             switch self {
             case .csv: return "clicktoknow-history.csv"
@@ -68,6 +73,7 @@ struct HistoryView: View {
         }
     }
 
+    /// 弹保存面板写出对应格式文件（结果经 notice 提示）
     private func export(format: ExportFormat) {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = format.fileName
@@ -83,6 +89,7 @@ struct HistoryView: View {
         }
     }
 
+    /// 清空全部历史（不可撤销，按钮已标 destructive）
     private func clear() {
         HistoryStore.shared.removeAll()
         entries = []

@@ -6,6 +6,7 @@ import SwiftUI
 final class HistoryWindowController: NSWindowController {
     private static let contentSize = NSSize(width: 720, height: 480)
 
+    /// 构建窗口并挂载 SwiftUI 历史视图
     init() {
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: Self.contentSize),
@@ -28,6 +29,7 @@ final class HistoryWindowController: NSWindowController {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
 
+    /// 每次展示都置前（HistoryView.onAppear 会拉取最新数据）
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
         window?.makeKeyAndOrderFront(nil)

@@ -4,6 +4,7 @@ import AppKit
 /// 依靠主菜单里的标准 selector 沿响应链分发；没有主菜单时设置页输入框无法复制粘贴 API Key，
 /// ⌘Q/⌘W/⌘H 等标准菜单命令也缺失。
 enum MainMenuBuilder {
+    /// 组装「应用 / 编辑 / 窗口」三个标准菜单；appName 用于菜单项文案
     static func make(appName: String = "ClickToKnow") -> NSMenu {
         let mainMenu = NSMenu()
 
@@ -14,6 +15,7 @@ enum MainMenuBuilder {
         return mainMenu
     }
 
+    /// 应用菜单：关于 / 隐藏 / 退出等标准条目
     private static func appMenuItem(appName: String) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: appName)
@@ -65,6 +67,7 @@ enum MainMenuBuilder {
         return item
     }
 
+    /// 窗口菜单：最小化/关闭；挂到 NSApp.windowsMenu 以启用标准窗口管理行为
     private static func windowMenuItem() -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "窗口")

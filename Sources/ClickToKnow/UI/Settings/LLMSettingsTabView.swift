@@ -3,8 +3,11 @@ import SwiftUI
 /// 连接测试状态（视图局部，不落盘）
 enum LLMTestState: Equatable {
     case idle
+    /// 测试进行中
     case testing
+    /// 成功（携带毫秒延迟）
     case success(latencyMs: Int)
+    /// 失败（携带可展示原因）
     case failure(reason: String)
 }
 
@@ -20,15 +23,18 @@ struct LLMSettingsTabView: View {
     /// 正在编辑的配置；nil 表示表单处于「新增」状态
     @State private var editingProfileID: UUID?
 
+    /// 表单字段：预设 / 协议 / 端点三件套（密钥仅输入用，不直接回显）
     @State private var presetID = ProviderPresets.customID
     @State private var apiProtocol: APIProtocol = .openAICompatible
     @State private var baseURL = ""
     @State private var apiKeyInput = ""
     @State private var model = ""
 
+    /// 连接测试状态
     @State private var testState: LLMTestState = .idle
     /// 连接测试的代际号：编辑表单/重新测试/保存都会 +1，过期结果回来时直接丢弃，避免旧结果覆盖新结果
     @State private var testGeneration = 0
+    /// 操作结果提示（保存/切换/删除）
     @State private var notice: String?
 
     /// 拉取到的模型目录；nil = 未拉取过（此时展示预设推荐 chips）
@@ -36,6 +42,7 @@ struct LLMSettingsTabView: View {
     @State private var fetchingModels = false
     @State private var fetchError: String?
 
+    /// 是否已完成首次加载（onAppear 只拉一次，避免覆盖用户编辑）
     @State private var loaded = false
 
     var body: some View {
@@ -258,6 +265,7 @@ struct LLMSettingsTabView: View {
         }
     }
 
+    /// 判断该配置是否当前启用
     private func isActive(_ profile: APIProfile) -> Bool {
         AppConfig.shared.activeProfile?.id == profile.id
     }
@@ -360,6 +368,7 @@ struct LLMSettingsTabView: View {
 
     // MARK: - 行为
 
+    /// 首次进入：拉取配置列表并载入当前生效项供编辑
     private func loadInitialState() {
         profiles = AppConfig.shared.apiProfiles
         if let active = AppConfig.shared.activeProfile {
@@ -368,6 +377,7 @@ struct LLMSettingsTabView: View {
         loaded = true
     }
 
+    /// 载入配置到表单（presetID 按已存 URL 反查，密钥不回显明文）
     private func loadForEdit(_ profile: APIProfile) {
         editingProfileID = profile.id
         apiProtocol = profile.apiProtocol
@@ -396,6 +406,7 @@ struct LLMSettingsTabView: View {
         notice = nil
     }
 
+    /// 应用预设：填充端点/协议/推荐模型（「自定义」不填充）
     private func applyPreset(_ id: String) {
         invalidateEndpointDerivations()
         notice = nil
@@ -446,6 +457,7 @@ struct LLMSettingsTabView: View {
         }
     }
 
+    /// 拉取模型目录：成功后当前模型不在目录里则自动套用第一个
     private func fetchModels() {
         fetchingModels = true
         fetchError = nil
@@ -477,6 +489,7 @@ struct LLMSettingsTabView: View {
         testState = .idle
     }
 
+    /// 校验并落库：upsert 配置 + 设为启用；非空密钥写入钥匙串（内部自动回退）
     private func save() {
         let trimmedURL = baseURL.trimmingCharacters(in: .whitespaces)
         let trimmedModel = model.trimmingCharacters(in: .whitespaces)
@@ -510,6 +523,7 @@ struct LLMSettingsTabView: View {
         statusModel.refresh()
     }
 
+    /// 一键切换启用配置
     private func activate(_ profile: APIProfile) {
         AppConfig.shared.activeProfileID = profile.id
         profiles = AppConfig.shared.apiProfiles
@@ -517,6 +531,7 @@ struct LLMSettingsTabView: View {
         statusModel.refresh()
     }
 
+    /// 删除配置（连同其钥匙串密钥）；正在编辑则表单回到「新增」
     private func removeProfile(_ profile: APIProfile) {
         AppConfig.shared.deleteProfile(id: profile.id)
         if editingProfileID == profile.id {
@@ -527,6 +542,7 @@ struct LLMSettingsTabView: View {
         statusModel.refresh()
     }
 
+    /// 清除正在编辑配置的已存密钥（结果经 notice 提示，失败需如实告知）
     private func clearKey() {
         guard let editingProfile else { return }
         let cleared = AppConfig.shared.clearAPIKey(for: editingProfile)

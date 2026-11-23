@@ -21,6 +21,7 @@ final class AppConfigProfilesTests: XCTestCase {
         super.tearDown()
     }
 
+    /// 构造测试 profile（默认 DeepSeek 配置）
     private func makeProfile(
         id: UUID = UUID(),
         apiProtocol: APIProtocol = .openAICompatible,

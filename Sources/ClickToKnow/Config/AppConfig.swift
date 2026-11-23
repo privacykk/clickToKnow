@@ -52,6 +52,7 @@ final class AppConfig {
         set { defaults.set(try? JSONEncoder().encode(newValue), forKey: Key.apiProfiles) }
     }
 
+    /// 当前生效配置的 id（无选中/未设置时为 nil，activeProfile 会回退列表首项）
     var activeProfileID: UUID? {
         get { defaults.string(forKey: Key.activeProfileID).flatMap(UUID.init(uuidString:)) }
         set { defaults.set(newValue?.uuidString, forKey: Key.activeProfileID) }
@@ -88,6 +89,7 @@ final class AppConfig {
         }
     }
 
+    /// 按生效 profile 生成钥匙串 account（"profile-<uuid>"），实现密钥按配置隔离
     static func keychainAccount(for profileID: UUID) -> String {
         "profile-\(profileID.uuidString)"
     }
@@ -150,6 +152,7 @@ final class AppConfig {
         return defaults.string(forKey: Key.apiKey) ?? ""
     }
 
+    /// 生效配置的端点/模型/协议只读视图（无配置时给安全默认值，不抛错）
     var baseURL: String { activeProfile?.baseURL ?? "" }
     var model: String { activeProfile?.model ?? "" }
     var apiProtocol: APIProtocol { activeProfile?.apiProtocol ?? .openAICompatible }
@@ -159,6 +162,7 @@ final class AppConfig {
         !(ProcessInfo.processInfo.environment["CLICKTOKNOW_API_KEY"] ?? "").isEmpty
     }
 
+    /// 判定密钥实际来源，顺序同 apiKey 读取链（环境 → 钥匙串 → 遗留明文 → 无）
     var apiKeySource: APIKeySource {
         if apiKeyFromEnvironment { return .environment }
         if let profile = activeProfile,
@@ -190,6 +194,7 @@ final class AppConfig {
         return Self.mask(key)
     }
 
+    /// 掩码规则：长度 > 8 保留前4后4，否则整体打点
     static func mask(_ key: String) -> String {
         guard key.count > 8 else { return String(repeating: "•", count: key.count) }
         return "\(key.prefix(4))••••\(key.suffix(4))"
@@ -250,6 +255,7 @@ final class AppConfig {
         migrateLegacyKeyIfNeeded()
     }
 
+    /// 遗留明文密钥迁移：钥匙串该 account 已有值则直接删明文；否则迁入成功后再删明文
     private func migrateLegacyKeyIfNeeded() {
         guard let legacy = defaults.string(forKey: Key.apiKey), !legacy.isEmpty else { return }
         let account = activeProfile.map { Self.keychainAccount(for: $0.id) } ?? "apiKey"

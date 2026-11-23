@@ -29,6 +29,7 @@ final class AppConfigHotKeyTests: XCTestCase {
         super.tearDown()
     }
 
+    /// 无持久化值时返回默认 ⌥⌘K
     func testDefaultBindingWhenNothingPersisted() {
         XCTAssertEqual(config.hotKeyBinding, CarbonKeyTranslator.defaultBinding)
         XCTAssertEqual(config.hotKeyBinding.displayString, "⌥⌘K")
@@ -56,6 +57,7 @@ final class AppConfigHotKeyTests: XCTestCase {
         XCTAssertEqual(config.hotKeyBinding.displayString, "⌥⌘K")
     }
 
+    /// setter 持久化后应广播绑定变更通知
     func testSettingBindingPostsNotification() {
         let expectation = expectation(
             forNotification: AppConfig.hotKeyBindingChangedNotification,

@@ -4,6 +4,7 @@ import XCTest
 
 /// 查询缓存：命中、键规范化（大小写/空白/尾斜杠不敏感）、配置指纹隔离、LRU 淘汰。
 final class InterpretationCacheTests: XCTestCase {
+    /// 构造缓存键（默认参数便于各用例微调单个字段）
     private func makeKey(
         term: String = "helm",
         baseURL: String = "https://api.deepseek.com",
@@ -13,6 +14,7 @@ final class InterpretationCacheTests: XCTestCase {
         InterpretationCache.key(term: term, baseURL: baseURL, model: model, apiProtocol: apiProtocol)
     }
 
+    /// 构造缓存值
     private func makeValue(_ term: String = "helm") -> Interpretation {
         Interpretation(term: term, content: "Kubernetes 包管理器", source: .llm)
     }

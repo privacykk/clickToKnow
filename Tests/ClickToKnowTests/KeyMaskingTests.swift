@@ -2,6 +2,7 @@ import XCTest
 
 @testable import ClickToKnow
 
+/// AppConfig.mask 掩码规则的验证：长键保留前后 4 位，短键全打点，绝不泄漏中段。
 final class KeyMaskingTests: XCTestCase {
     func testLongKeyKeepsFirstFourAndLastFour() {
         XCTAssertEqual(AppConfig.mask("sk-abcdef123456"), "sk-a••••3456")

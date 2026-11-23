@@ -3,14 +3,18 @@ import Foundation
 /// 一条查询记录（生词本条目）。
 struct HistoryEntry: Codable, Equatable, Identifiable {
     let id: UUID
+    /// 被查询的词条
     let term: String
+    /// 释义正文（Markdown 或纯文本）
     let content: String
     /// "llm" / "systemDictionary"（Interpretation.Source.rawValue）
     let source: String
     /// 查询时生效的模型名；系统词典兜底为 nil
     let model: String?
+    /// 查询时间
     let date: Date
 
+    /// date/id 缺省自动生成，常规写入无需关心
     init(term: String, content: String, source: String, model: String?, date: Date = Date(), id: UUID = UUID()) {
         self.id = id
         self.term = term
@@ -28,9 +32,12 @@ struct HistoryEntry: Codable, Equatable, Identifiable {
 final class HistoryStore {
     static let shared = HistoryStore()
 
+    /// 历史记录文件路径（Application Support/ClickToKnow/history.json）
     private let fileURL: URL
+    /// 条目上限，超出淘汰最旧
     private let capacity = 500
 
+    /// 内存中的全部记录（新 → 旧）
     private(set) var entries: [HistoryEntry] = []
 
     /// directory 可注入（单测用临时目录，避免污染真实数据）
@@ -43,6 +50,7 @@ final class HistoryStore {
         entries = Self.load(from: fileURL)
     }
 
+    /// 追加一条记录（插到最前）并裁剪到容量上限，随后同步落盘
     func add(_ interpretation: Interpretation, model: String?) {
         entries.insert(HistoryEntry(
             term: interpretation.term,
@@ -56,6 +64,7 @@ final class HistoryStore {
         save()
     }
 
+    /// 清空全部记录并落盘
     func removeAll() {
         entries.removeAll()
         save()
@@ -90,11 +99,13 @@ final class HistoryStore {
         }.joined(separator: "\n") + "\n"
     }
 
+    /// CSV 字段转义：含逗号/引号/换行时用双引号包裹，内部引号翻倍
     private static func csvField(_ raw: String) -> String {
         guard raw.contains(",") || raw.contains("\"") || raw.contains("\n") else { return raw }
         return "\"" + raw.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }
 
+    /// TSV 字段清洗：制表符替换为空格并去除首尾空白
     private static func tsvField(_ raw: String) -> String {
         raw.replacingOccurrences(of: "\t", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -102,6 +113,7 @@ final class HistoryStore {
 
     // MARK: - 持久化
 
+    /// 原子写盘：日期用 ISO 8601，失败仅记日志（下次写入重试）
     private func save() {
         do {
             let encoder = JSONEncoder()
@@ -113,6 +125,7 @@ final class HistoryStore {
         }
     }
 
+    /// 从磁盘加载（文件不存在或解析失败返回空数组，不阻断启动）
     private static func load(from url: URL) -> [HistoryEntry] {
         guard let data = try? Data(contentsOf: url) else { return [] }
         let decoder = JSONDecoder()

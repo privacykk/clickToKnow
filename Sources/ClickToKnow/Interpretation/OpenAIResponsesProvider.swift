@@ -9,6 +9,7 @@ final class OpenAIResponsesProvider: InterpretationProvider, LLMPinging {
     private let config: Config
     private let session: URLSession
 
+    /// session 可注入，便于测试替换为本地 stub
     init(config: Config, session: URLSession = LLMProviderSupport.makeSession()) {
         self.config = config
         self.session = session
@@ -59,6 +60,7 @@ final class OpenAIResponsesProvider: InterpretationProvider, LLMPinging {
         return Date().timeIntervalSince(start)
     }
 
+    /// 发送请求并做过错归类；timeout 传 nil 用 session 默认（20s），ping 显式压到 15s
     private func send(body: [String: Any], timeout: TimeInterval?) async throws -> Data {
         guard let url = responsesURL else {
             throw InterpretationError.badConfiguration
@@ -89,12 +91,14 @@ final class OpenAIResponsesProvider: InterpretationProvider, LLMPinging {
         return data
     }
 
+    /// 端点拼接：剥尾部斜杠后追加 /responses；无 scheme 视为非法配置
     private var responsesURL: URL? {
         let base = config.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard base.hasPrefix("http://") || base.hasPrefix("https://") else { return nil }
         return URL(string: base + "/responses")
     }
 
+    /// Responses 响应模型：output[] 按 type 分块，正文取 message 项的 output_text
     private struct ResponsesReply: Decodable {
         struct Item: Decodable {
             struct Content: Decodable {

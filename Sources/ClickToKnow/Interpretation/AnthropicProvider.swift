@@ -12,6 +12,7 @@ final class AnthropicProvider: InterpretationProvider, LLMPinging {
     private let config: Config
     private let session: URLSession
 
+    /// session 可注入，便于测试替换为本地 stub
     init(config: Config, session: URLSession = LLMProviderSupport.makeSession()) {
         self.config = config
         self.session = session
@@ -49,6 +50,7 @@ final class AnthropicProvider: InterpretationProvider, LLMPinging {
         return Date().timeIntervalSince(start)
     }
 
+    /// 构造探测/对话请求体（max_tokens 按用途传入）
     private func pingBody(maxTokens: Int) -> [String: Any] {
         [
             "model": config.model,
@@ -89,12 +91,14 @@ final class AnthropicProvider: InterpretationProvider, LLMPinging {
         return data
     }
 
+    /// 端点拼接：剥尾部斜杠后追加 /v1/messages；无 scheme 视为非法配置
     private var messagesURL: URL? {
         let base = config.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard base.hasPrefix("http://") || base.hasPrefix("https://") else { return nil }
         return URL(string: base + "/v1/messages")
     }
 
+    /// Messages API 响应模型：只取需要的 content 文本块
     private struct MessagesResponse: Decodable {
         struct Block: Decodable {
             let type: String

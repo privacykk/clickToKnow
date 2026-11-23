@@ -2,6 +2,8 @@ import AppKit
 
 /// 极简 Markdown → NSAttributedString，支持 **加粗** 与 `- ` 列表前缀，够 LLM 输出用（KISS）。
 enum MarkdownRenderer {
+    /// 逐行转换：`- ` 前缀换成 • 列表符，`**` 分段后奇数段加粗；
+    /// 返回值直接用于弹窗 NSTextView（颜色为动态 labelColor，自动适配亮暗外观）
     static func render(_ markdown: String) -> NSAttributedString {
         let base = NSFont.systemFont(ofSize: 14)
         let bold = NSFont.boldSystemFont(ofSize: 14)

@@ -4,23 +4,32 @@ import AppKit
 /// 鼠标悬停期间暂停倒计时（避免长内容读到一半被打断）。
 @MainActor
 final class ResultPopover {
+    /// 无边框不抢焦点的浮动面板
     private let panel: NSPanel
+    /// 圆角容器（同时承担悬停检测）
     private let container: HoverDetectingView
     private let scrollView: NSScrollView
+    /// 释义内容承载（Markdown 渲染结果直接设置）
     private let textView: NSTextView
+    /// 点击外部关闭的全局监视器
     private var dismissMonitor: Any?
+    /// Esc 关闭的本地监视器
     private var keyMonitor: Any?
+    /// 自动关闭任务（悬停时可取消重排）
     private var autoCloseItem: DispatchWorkItem?
 
+    /// 当前展示使用的自动关闭时限（悬停暂停倒计时时要用）
     private var autoCloseDuration: TimeInterval = 15
 
     /// 弹窗关闭时回调（点击外部 / 超时 / Esc）：AppDelegate 借此取消仍在进行的 LLM 请求，避免白烧 token
     var onClose: (() -> Void)?
 
+    // 尺寸约束：内容超出最大高度转为滚动
     private static let maxWidth: CGFloat = 560
     private static let maxContentHeight: CGFloat = 500
     private static let padding: CGFloat = 16
 
+    /// 组装面板、滚动视图、文本视图与悬停容器
     init() {
         panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: Self.maxWidth, height: 200),
@@ -73,6 +82,8 @@ final class ResultPopover {
         container.layer?.borderColor = NSColor.separatorColor.cgColor
     }
 
+    /// 展示弹窗：按内容测高定尺寸，锚点贴调用方给定的屏幕位置并 clamp 进可视区。
+    /// 每次展示重装监视器与倒计时（loading 增量复用同一弹窗刷新内容）。
     func show(_ attributed: NSAttributedString, at mouse: NSPoint, autoCloseAfter: TimeInterval = 15) {
         autoCloseDuration = autoCloseAfter
         applyAppearance()
@@ -115,6 +126,7 @@ final class ResultPopover {
         panel.orderFront(nil)
     }
 
+    /// 关闭弹窗：清理监视器与倒计时并通知 onClose（幂等）
     func close() {
         removeDismissMonitor()
         removeKeyMonitor()
@@ -135,6 +147,7 @@ final class ResultPopover {
         }
     }
 
+    /// 移除 Esc 监视器
     private func removeKeyMonitor() {
         if let monitor = keyMonitor {
             NSEvent.removeMonitor(monitor)
@@ -152,10 +165,12 @@ final class ResultPopover {
         }
     }
 
+    /// 点所在屏幕（多点时按坐标找所在屏）
     private static func screen(for point: NSPoint) -> NSScreen? {
         NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) } ?? NSScreen.main
     }
 
+    /// 重排自动关闭倒计时（展示与悬停移开时调用）
     private func scheduleAutoClose() {
         autoCloseItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
@@ -165,6 +180,7 @@ final class ResultPopover {
         DispatchQueue.main.asyncAfter(deadline: .now() + autoCloseDuration, execute: item)
     }
 
+    /// 点击弹窗外任意位置即关闭（全局监视；点击弹窗自身不触发）
     private func addDismissMonitor() {
         removeDismissMonitor()
         dismissMonitor = NSEvent.addGlobalMonitorForEvents(
@@ -179,6 +195,7 @@ final class ResultPopover {
         }
     }
 
+    /// 移除点击外部监视器
     private func removeDismissMonitor() {
         if let monitor = dismissMonitor {
             NSEvent.removeMonitor(monitor)
@@ -189,9 +206,11 @@ final class ResultPopover {
 
 /// 能感知鼠标进出的容器视图（用于悬停暂停倒计时）
 private final class HoverDetectingView: NSView {
+    /// 进/出回调（true = 进入）
     var onHover: ((Bool) -> Void)?
     private var trackingArea: NSTrackingArea?
 
+    /// bounds 变化时重建跟踪区，保证悬停检测覆盖最新可视范围
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let area = trackingArea {

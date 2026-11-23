@@ -7,9 +7,11 @@ import Security
 /// 读取结果（含「确实没有条目」）做内存缓存：状态页每秒轮询密钥来源，
 /// 若只缓存命中结果，未配置密钥时会每秒向 securityd 发起多次查询，ad-hoc 场景还会反复弹框。
 enum KeychainSecretStore {
+    /// 钥匙串条目的 kSecAttrService 值，本应用所有密钥共用
     static let service = "ClickToKnow"
 
     private static let lock = NSLock()
+    /// 成功读到的密钥内存缓存（account → 明文），避免高频查询打钥匙串
     private static var cache: [String: String] = [:]
     /// 已确认不存在/不可读的 account：避免每秒重复查询与重复弹系统授权框
     private static var missing: Set<String> = []
@@ -50,6 +52,8 @@ enum KeychainSecretStore {
         return true
     }
 
+    /// 读取密钥（含缓存）：命中/已确认缺失直接返回，否则查询钥匙串。
+    /// 任何失败（含被系统询问拒绝）都缓存为「缺失」并返回 nil。
     static func load(account: String = "apiKey") -> String? {
         lock.lock()
         let cached = cache[account]
@@ -98,6 +102,7 @@ enum KeychainSecretStore {
         return true
     }
 
+    /// 将 account 记入「缺失」集合并返回 nil（load 的失败出口共用此收尾）
     private static func cacheMiss(_ account: String) -> String? {
         lock.lock()
         missing.insert(account)
@@ -105,6 +110,7 @@ enum KeychainSecretStore {
         return nil
     }
 
+    /// 构造通用密码条目的基础查询字典（类 + service + account）
     private static func baseQuery(account: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,

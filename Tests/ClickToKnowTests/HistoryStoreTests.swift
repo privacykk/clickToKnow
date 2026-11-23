@@ -23,6 +23,7 @@ final class HistoryStoreTests: XCTestCase {
         super.tearDown()
     }
 
+    /// 构造测试用释义
     private func makeInterpretation(_ term: String, content: String = "释义") -> Interpretation {
         Interpretation(term: term, content: content, source: .llm)
     }

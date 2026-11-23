@@ -3,10 +3,12 @@ import Carbon.HIToolbox
 
 /// 快捷键绑定：Carbon 虚拟键码 + 修饰键位掩码，可输出人类可读展示串（如 ⌥⌘K）。
 struct HotKeyBinding: Codable, Equatable {
+    /// Carbon 虚拟键码（kVK_* 常量）
     var keyCode: UInt32
     /// Carbon 修饰键位掩码：cmdKey=256 / shiftKey=512 / optionKey=2048 / controlKey=4096
     var carbonModifiers: UInt32
 
+    /// 人类可读展示串（如 ⌥⌘K）
     var displayString: String {
         CarbonKeyTranslator.displayString(keyCode: keyCode, modifiers: carbonModifiers)
     }

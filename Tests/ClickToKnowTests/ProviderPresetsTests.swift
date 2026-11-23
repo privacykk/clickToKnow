@@ -2,7 +2,9 @@ import XCTest
 
 @testable import ClickToKnow
 
+/// 预设反查与不变量：URL 归一化匹配、Ollama 免密钥唯一性、自定义项空值、协议归属。
 final class ProviderPresetsTests: XCTestCase {
+    /// 已知端点反查（尾斜杠/大小写不敏感）
     func testMatchingKnownPresetsIgnoresTrailingSlashAndCase() {
         XCTAssertEqual(ProviderPresets.matching(baseURL: "https://api.deepseek.com/")?.id, "deepseek")
         XCTAssertEqual(ProviderPresets.matching(baseURL: "HTTPS://API.MOONSHOT.CN/v1")?.id, "moonshot")

@@ -1,7 +1,8 @@
 import Foundation
 
+/// 测试公共工具。
 enum TestHelpers {
-    /// URLSession 经 URLProtocol 分发时常把 httpBody 转为 httpBodyStream，两种都要兼容
+    /// 兼容两种请求体载体读取 POST body（URLProtocol mock 断言请求内容用）
     static func bodyData(of request: URLRequest) -> Data? {
         if let body = request.httpBody { return body }
         guard let stream = request.httpBodyStream else { return nil }

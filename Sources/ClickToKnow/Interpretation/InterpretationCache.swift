@@ -13,6 +13,7 @@ final class InterpretationCache {
         self.capacity = max(capacity, 1)
     }
 
+    /// 当前缓存条目数（状态页展示用）
     var count: Int { store.count }
 
     /// 缓存键：规范化词条 + 配置指纹。换供应商 / 换模型后旧条目自然隔离，
@@ -26,12 +27,14 @@ final class InterpretationCache {
         return "\(apiProtocol.rawValue)|\(normalizedBase)|\(model)|\(normalizedTerm)"
     }
 
+    /// 命中即刷新访问顺序（维持 LRU 语义）
     func get(_ key: String) -> Interpretation? {
         guard let value = store[key] else { return nil }
         touch(key)
         return value
     }
 
+    /// 写入缓存：仅当新增条目且已达容量时，淘汰最久未用条目
     func put(_ key: String, _ value: Interpretation) {
         if store[key] == nil, store.count >= capacity, let oldest = accessOrder.first {
             store.removeValue(forKey: oldest)
@@ -41,6 +44,7 @@ final class InterpretationCache {
         touch(key)
     }
 
+    /// 清空缓存（切换/删除配置后由调用方触发，防旧释义串味）
     func removeAll() {
         store.removeAll()
         accessOrder.removeAll()

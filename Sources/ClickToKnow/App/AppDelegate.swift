@@ -6,7 +6,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBarController: StatusBarController?
     private var selectionMonitor: SelectionMonitor?
     private var popover: ResultPopover?
+    /// 应用状态聚合模型（状态页数据源）
     private let statusModel = AppStatusModel()
+    /// 快捷键绑定变更监听（AppConfig 广播后刷新状态页）
     private var hotKeyObserver: NSObjectProtocol?
 
     /// 自增请求序号：LLM 响应耗时不定，若两次查询的返回顺序颠倒，
@@ -49,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    /// 装配选词监听、弹窗关闭回调与菜单栏暂停开关
     private func setupSelectionMonitor() {
         selectionMonitor = SelectionMonitor(
             onSelected: { [weak self] text, location, context in
@@ -119,6 +122,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// 选词完成的核心流程：缓存查询 → loading 反馈 → 流式/非流式释义 → 落历史。
+    /// 流式增量与最终结果都校验 requestID，过期响应一律丢弃。
     private func handleSelectedText(_ text: String, at location: NSPoint, context: String?) {
         currentRequest?.cancel() // 新查询取代旧查询，旧请求立即断连而非仅丢弃结果
         requestCounter += 1
@@ -169,10 +174,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// 展示成功释义（Markdown 渲染后入弹窗，自动关闭沿用上次时限）
     private func show(_ result: Interpretation, at location: NSPoint) {
         popover?.show(MarkdownRenderer.render(result.content), at: location)
     }
 
+    /// 展示失败提示：附设置入口指引，便于自查配置
     private func showFailure(_ message: String, for text: String, at location: NSPoint) {
         let hint = """
         **未能查询：\(text)**
@@ -184,6 +191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover?.show(MarkdownRenderer.render(hint), at: location)
     }
 
+    /// 首次启动弹系统授权框（AX 直读与模拟 ⌘C 都依赖辅助功能权限）
     private func requestAccessibilityIfNeeded() {
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         if !AXIsProcessTrustedWithOptions(opts) {

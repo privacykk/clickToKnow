@@ -24,6 +24,7 @@ final class SelectionMonitor {
     private let clipboard = ClipboardManager()
     /// 回调参数：选中文本、弹窗锚点（AX 路径为选区左上角，⌘C 兜底为鼠标位置）、选区前后文（⌘C 路径为 nil）
     private let onSelected: (String, NSPoint, String?) -> Void
+    /// 抓取失败回调（可为空实现），弹窗据分类给出可操作提示
     private let onFailure: (SelectionFailure, NSPoint) -> Void
 
     /// 当前生效绑定：注册失败时的回滚基准，也是状态页展示的数据源
@@ -36,8 +37,10 @@ final class SelectionMonitor {
     /// 选词当作"原始剪贴板"备份，导致恢复后用户剪贴板被污染成错误内容。
     private var isProcessing = false
 
+    /// 热键当前是否注册成功（状态页展示用）
     var isHotKeyRegistered: Bool { hotKey.isRegistered }
 
+    /// onSelected 必传；onFailure 缺省为空实现（不提示）
     init(
         onSelected: @escaping (String, NSPoint, String?) -> Void,
         onFailure: @escaping (SelectionFailure, NSPoint) -> Void = { _, _ in }
@@ -46,6 +49,7 @@ final class SelectionMonitor {
         self.onFailure = onFailure
     }
 
+    /// 启动监听：按持久化配置注册热键（默认 ⌥⌘K）
     func start() {
         // 绑定来自配置（默认 ⌥⌘K，⌥⌘D 与系统「显示/隐藏 Dock」冲突）
         reloadHotKey(with: AppConfig.shared.hotKeyBinding)
@@ -69,6 +73,7 @@ final class SelectionMonitor {
         return false
     }
 
+    /// 注册内部包装（reloadHotKey 与恢复暂停共用）
     private func register(_ binding: HotKeyBinding) -> Bool {
         hotKey.register(
             keyCode: binding.keyCode,
@@ -91,6 +96,7 @@ final class SelectionMonitor {
         }
     }
 
+    /// 热键触发入口：前置检查（权限/安全输入/黑名单）→ AX 直读 → ⌘C 兜底
     private func handleHotKey() {
         guard !isProcessing else { return }
         let mouse = NSEvent.mouseLocation
@@ -130,6 +136,7 @@ final class SelectionMonitor {
         pollRead(initialCount: initialCount, deadline: Date().addingTimeInterval(0.5), mouse: mouse)
     }
 
+    /// 轮询等待复制生效（20ms 间隔，0.5s 截止）：changeCount 变化即读取并条件恢复快照
     private func pollRead(initialCount: Int, deadline: Date, mouse: NSPoint) {
         if clipboard.changeCount != initialCount {
             let text = clipboard.readText()?
@@ -155,6 +162,7 @@ final class SelectionMonitor {
         }
     }
 
+    /// 结束一次抓取（解除 isProcessing 互斥）
     private func finish() {
         isProcessing = false
     }
