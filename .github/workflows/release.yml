@@ -34,6 +34,8 @@ jobs:
       - name: 构建并打包（ad-hoc 签名）
         if: steps.meta.outputs.skip == 'false'
         env:
+          # VERSION 必须传：package.sh 不读 tag，缺了会退回脚本内的默认版本（0.2.1）
+          VERSION: ${{ steps.meta.outputs.version }}
           # 关闭时间戳后缀（默认 APPEND_TIMESTAMP=1），使产物名为 ClickToKnow-<版本>.dmg/.zip
           APPEND_TIMESTAMP: '0'
           BUILD_NUMBER: ${{ github.run_number }}
@@ -71,8 +73,14 @@ jobs:
 
           FILES=(dist/*.dmg dist/*.zip)
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release 已存在，覆盖上传附件"
-            gh release upload "$TAG" "${FILES[@]}" --clobber
+            # 重跑时先清空旧附件：否则版本号变化后新旧文件名并存，用户会下到过期安装包
+            echo "Release 已存在，清空旧附件后重新上传"
+            gh release view "$TAG" --json assets --jq '.assets[].name' > stale-assets.txt
+            while IFS= read -r ASSET; do
+              [ -n "$ASSET" ] || continue
+              gh release delete-asset "$TAG" "$ASSET" --yes
+            done < stale-assets.txt
+            gh release upload "$TAG" "${FILES[@]}"
           else
             gh release create "$TAG" \
               --title "ClickToKnow ${VERSION}" \
