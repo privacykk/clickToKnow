@@ -12,7 +12,7 @@ final class AppConfigBlacklistTests: XCTestCase {
     override func setUp() {
         super.setUp()
         defaults = UserDefaults(suiteName: suiteName)
-        config = AppConfig(defaults: defaults)
+        config = AppConfig(defaults: defaults, secrets: TestHelpers.InMemorySecretStore())
     }
 
     override func tearDown() {

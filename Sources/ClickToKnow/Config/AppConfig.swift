@@ -13,20 +13,28 @@ final class AppConfig {
     static let llmConfigChangedNotification = Notification.Name("ctkLLMConfigChanged")
 
     private let defaults: UserDefaults
+    /// 密钥存储（生产 = 钥匙串）；单测注入可失败实现以覆盖回退与隔离路径
+    private let secrets: any SecretStoring
 
     private init() {
         // 显式 suite，配置固定写入 ~/Library/Preferences/ClickToKnow.plist，
         // 不受裸可执行文件缺少 bundle 的影响，也便于 `defaults write ClickToKnow ...` 直接写入。
         defaults = UserDefaults(suiteName: "ClickToKnow") ?? .standard
+        secrets = KeychainSecrets()
     }
 
-    /// 注入 UserDefaults 的初始化入口，仅供单元测试使用（独立 suite 防污染真实配置）
-    init(defaults: UserDefaults) {
+    /// 注入 UserDefaults / 密钥存储的初始化入口，仅供单元测试使用（独立 suite 防污染真实配置）
+    init(defaults: UserDefaults, secrets: any SecretStoring = KeychainSecrets()) {
         self.defaults = defaults
+        self.secrets = secrets
     }
 
     private enum Key {
         static let apiKey = "apiKey" // 遗留明文密钥：只读兼容与迁移，不再新增写入
+        /// 遗留全局存储（默认钥匙串 account + 上面这条明文）的归属配置。
+        /// 单配置时代的这两个存储都没有 owner，切换生效配置后会被新配置直接读到，
+        /// 因此写入/迁移时记录归属，读取时只允许归属配置使用。
+        static let legacyKeyOwnerProfileID = "legacyAPIKeyOwnerProfileID"
         static let baseURL = "baseURL" // 遗留单配置端点：迁移后即移除，不再读写
         static let model = "model" // 同上
         static let apiProtocol = "apiProtocol" // 同上
@@ -36,6 +44,9 @@ final class AppConfig {
         static let hotKeyModifiers = "hotKeyModifiers"
         static let blacklistedBundleIDs = "blacklistedBundleIDs"
     }
+
+    /// 单配置时代遗留的钥匙串 account（无 owner 归属时的历史存储位）
+    static let legacyKeychainAccount = "apiKey"
 
     /// 密钥当前生效来源，用于状态页/设置页展示
     enum APIKeySource: String {
@@ -97,19 +108,30 @@ final class AppConfig {
     @discardableResult
     func upsertProfile(_ profile: APIProfile) -> APIProfile {
         var profiles = apiProfiles
+        let isFirstProfile = profiles.isEmpty
         if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
             profiles[index] = profile
         } else {
             profiles.append(profile)
         }
         apiProfiles = profiles
+        // 首个配置出现时收编无主的遗留密钥：此时 owner 唯一可选，不会串给别的配置
+        if isFirstProfile, legacyKeyOwnerID == nil, let value = loadLegacyKeyValue() {
+            legacyKeyOwnerID = profile.id
+            adoptLegacyKey(value, into: profile.id)
+        }
         return profile
     }
 
     /// 删除配置并清理其钥匙串密钥；激活项被删时切到剩余第一项（无剩余则回到系统词典兜底）
     func deleteProfile(id: UUID) {
         apiProfiles = apiProfiles.filter { $0.id != id }
-        KeychainSecretStore.delete(account: Self.keychainAccount(for: id))
+        secrets.delete(account: Self.keychainAccount(for: id))
+        // 遗留存储若归属该配置，必须一并清除：否则这份密钥会变成无主值，
+        // 被下一个生效配置继承（正是「A 的密钥串到 B」的路径之一）
+        if legacyKeyApplies(to: id) {
+            clearLegacyKeyStorage()
+        }
         if activeProfileID == id {
             activeProfileID = apiProfiles.first?.id
         }
@@ -120,42 +142,78 @@ final class AppConfig {
         "profile-\(profileID.uuidString)"
     }
 
-    /// 指定配置实际生效的密钥（环境变量 → 该配置的钥匙串 → 仅生效配置可退遗留链）。
+    // MARK: - 遗留密钥归属（单配置时代的全局存储）
+
+    /// 遗留全局密钥当前归属的配置 id
+    private var legacyKeyOwnerID: UUID? {
+        get { defaults.string(forKey: Key.legacyKeyOwnerProfileID).flatMap(UUID.init(uuidString:)) }
+        set {
+            if let newValue {
+                defaults.set(newValue.uuidString, forKey: Key.legacyKeyOwnerProfileID)
+            } else {
+                defaults.removeObject(forKey: Key.legacyKeyOwnerProfileID)
+            }
+        }
+    }
+
+    /// 遗留全局存储（默认钥匙串 account / UserDefaults 明文）是否属于该配置。
+    /// 无 owner 的历史数据一律不认（迁移会在启动或建首个配置时补上 owner），
+    /// 这样「钥匙串不可用 → 回退明文 → 切换生效配置」不会把 A 的密钥交给 B。
+    private func legacyKeyApplies(to profileID: UUID?) -> Bool {
+        guard let profileID, let owner = legacyKeyOwnerID else { return false }
+        return owner == profileID
+    }
+
+    /// 读取遗留全局密钥（调用方须先用 legacyKeyApplies 校验归属）
+    private func loadLegacyKeyValue() -> String? {
+        if let key = secrets.load(account: Self.legacyKeychainAccount), !key.isEmpty { return key }
+        let plaintext = defaults.string(forKey: Key.apiKey) ?? ""
+        return plaintext.isEmpty ? nil : plaintext
+    }
+
+    /// 清空遗留全局存储（明文 + 默认钥匙串 account + 归属记录）
+    @discardableResult
+    private func clearLegacyKeyStorage() -> Bool {
+        defaults.removeObject(forKey: Key.apiKey)
+        let keychainCleared = secrets.delete(account: Self.legacyKeychainAccount)
+        // 钥匙串删不掉时保留归属记录：遗留值仍在，但只能被原归属配置读到
+        if keychainCleared { legacyKeyOwnerID = nil }
+        return keychainCleared
+    }
+
+    /// 指定配置实际生效的密钥：环境变量 → 该配置自己的钥匙串 → 仅当遗留存储归属它时才回退。
     /// 供设置页「测试连接 / 拉取模型」对非生效配置也能取到正确密钥。
     func effectiveAPIKey(for profile: APIProfile?) -> String {
         if apiKeyFromEnvironment {
             return ProcessInfo.processInfo.environment["CLICKTOKNOW_API_KEY"] ?? ""
         }
         guard let profile else { return "" }
-        if let key = KeychainSecretStore.load(account: Self.keychainAccount(for: profile.id)),
+        if let key = secrets.load(account: Self.keychainAccount(for: profile.id)),
            !key.isEmpty { return key }
-        if activeProfile?.id == profile.id {
-            if let key = KeychainSecretStore.load(), !key.isEmpty { return key }
-            return defaults.string(forKey: Key.apiKey) ?? ""
-        }
-        return ""
+        guard legacyKeyApplies(to: profile.id) else { return "" }
+        return loadLegacyKeyValue() ?? ""
     }
 
-    /// 指定配置的已存密钥掩码。legacy 链（默认 account / UserDefaults 明文）只可能属于
-    /// 当前生效配置（单配置时代的遗留），非生效配置不回退到它，避免误导性回显。
+    /// 指定配置的已存密钥掩码。legacy 链（默认 account / UserDefaults 明文）只对
+    /// 归属该配置时回显，否则会出现「B 显示着 A 的掩码」的误导。
     func storedKeyMask(for profile: APIProfile) -> (masked: String, legacy: Bool)? {
-        if let key = KeychainSecretStore.load(account: Self.keychainAccount(for: profile.id)), !key.isEmpty {
+        if let key = secrets.load(account: Self.keychainAccount(for: profile.id)), !key.isEmpty {
             return (Self.mask(key), false)
         }
-        if activeProfile?.id == profile.id {
-            if let key = KeychainSecretStore.load(), !key.isEmpty { return (Self.mask(key), false) }
-            if let key = defaults.string(forKey: Key.apiKey), !key.isEmpty { return (Self.mask(key), true) }
+        guard legacyKeyApplies(to: profile.id) else { return nil }
+        if let key = secrets.load(account: Self.legacyKeychainAccount), !key.isEmpty {
+            return (Self.mask(key), false)
         }
+        if let key = defaults.string(forKey: Key.apiKey), !key.isEmpty { return (Self.mask(key), true) }
         return nil
     }
 
-    /// 清除指定配置的密钥（含其作为生效配置时的遗留存储）。返回是否确认清除成功。
+    /// 清除指定配置的密钥（含归属它的遗留存储）。返回是否确认清除成功。
     @discardableResult
     func clearAPIKey(for profile: APIProfile) -> Bool {
-        var succeeded = KeychainSecretStore.delete(account: Self.keychainAccount(for: profile.id))
-        if activeProfile?.id == profile.id {
-            succeeded = KeychainSecretStore.delete() && succeeded
-            defaults.removeObject(forKey: Key.apiKey)
+        var succeeded = secrets.delete(account: Self.keychainAccount(for: profile.id))
+        if legacyKeyApplies(to: profile.id) {
+            succeeded = clearLegacyKeyStorage() && succeeded
         }
         notifyLLMConfigChanged()
         return succeeded
@@ -163,21 +221,8 @@ final class AppConfig {
 
     // MARK: - 生效配置的只读视图（ProviderFactory / 状态页 / 测试器共用）
 
-    /// 密钥优先从环境变量读取，避免写进代码/仓库；其次按生效配置查钥匙串，再退遗留存储
-    var apiKey: String {
-        if apiKeyFromEnvironment {
-            return ProcessInfo.processInfo.environment["CLICKTOKNOW_API_KEY"] ?? ""
-        }
-        if let profile = activeProfile,
-           let keychain = KeychainSecretStore.load(account: Self.keychainAccount(for: profile.id)),
-           !keychain.isEmpty {
-            return keychain
-        }
-        if let keychain = KeychainSecretStore.load(), !keychain.isEmpty {
-            return keychain
-        }
-        return defaults.string(forKey: Key.apiKey) ?? ""
-    }
+    /// 生效配置实际生效的密钥（读取链见 effectiveAPIKey(for:)）
+    var apiKey: String { effectiveAPIKey(for: activeProfile) }
 
     /// 生效配置的端点/模型/协议只读视图（无配置时给安全默认值，不抛错）
     var baseURL: String { activeProfile?.baseURL ?? "" }
@@ -189,13 +234,15 @@ final class AppConfig {
         !(ProcessInfo.processInfo.environment["CLICKTOKNOW_API_KEY"] ?? "").isEmpty
     }
 
-    /// 判定密钥实际来源，顺序同 apiKey 读取链（环境 → 钥匙串 → 遗留明文 → 无）
+    /// 判定密钥实际来源，顺序同 apiKey 读取链（环境 → 该配置钥匙串 → 归属它的遗留存储 → 无）
     var apiKeySource: APIKeySource {
         if apiKeyFromEnvironment { return .environment }
-        if let profile = activeProfile,
-           let keychain = KeychainSecretStore.load(account: Self.keychainAccount(for: profile.id)),
-           !keychain.isEmpty { return .keychain }
-        if let keychain = KeychainSecretStore.load(), !keychain.isEmpty { return .keychain }
+        guard let profile = activeProfile else { return .none }
+        if let key = secrets.load(account: Self.keychainAccount(for: profile.id)), !key.isEmpty {
+            return .keychain
+        }
+        guard legacyKeyApplies(to: profile.id) else { return .none }
+        if let key = secrets.load(account: Self.legacyKeychainAccount), !key.isEmpty { return .keychain }
         if let legacy = defaults.string(forKey: Key.apiKey), !legacy.isEmpty { return .legacyUserDefaults }
         return .none
     }
@@ -250,48 +297,40 @@ final class AppConfig {
     }
 
     /// 为生效配置写入或清除密钥：优先钥匙串，失败回退 UserDefaults（裸可执行 ad-hoc 签名场景保底）。
-    /// 传空串 = 同时清除两处存储（环境变量来源的密钥不受影响，仍生效）。
+    /// 传空串 = 清除该配置的密钥存储（环境变量来源的密钥不受影响，仍生效）。
     /// 返回值：true = 钥匙串操作成功（或非空密钥已安全落钥匙串）；false = 回退/删除失败，
     /// 调用方应据此如实提示，避免「已清除」但旧密钥仍在钥匙串里复活。
     @discardableResult
     func setAPIKey(_ value: String) -> Bool {
-        let account = activeProfile.map { Self.keychainAccount(for: $0.id) } ?? "apiKey"
-        if value.isEmpty {
-            let profileDeleted = KeychainSecretStore.delete(account: account)
-            // 默认 account 与明文属于同一生效配置（单配置时代遗留），一并清除避免旧值复活
-            let legacyDeleted = KeychainSecretStore.delete()
-            defaults.removeObject(forKey: Key.apiKey)
-            notifyLLMConfigChanged()
-            return profileDeleted && legacyDeleted
+        guard let profile = activeProfile else {
+            // 没有生效配置时无处归属：不写全局明文（否则会被下个新建配置继承）
+            if !value.isEmpty {
+                Log.config.warning("尚无生效 API 配置，密钥未保存")
+                return false
+            }
+            clearLegacyKeyStorage()
+            return true
         }
-        let savedToKeychain = KeychainSecretStore.save(value, account: account)
-        if savedToKeychain {
-            defaults.removeObject(forKey: Key.apiKey) // 同步移除遗留明文，保持单一事实来源
-        } else {
-            defaults.set(value, forKey: Key.apiKey)
-        }
-        notifyLLMConfigChanged()
-        return savedToKeychain
+        return setAPIKey(value, for: profile)
     }
 
     /// 为指定配置写入密钥（编辑非生效配置时用，避免误写到当前生效项）。
-    /// 钥匙串写入失败时只有生效配置能回退本地明文；非生效配置无法安全保存，返回 false 由 UI 如实提示。
+    /// 钥匙串写入失败时回退到的本地明文会记录归属该配置，因此非生效配置也能安全回退；
+    /// 但仍返回 false，由 UI 如实提示「已回退本地存储」。
     @discardableResult
     func setAPIKey(_ value: String, for profile: APIProfile) -> Bool {
         guard !value.isEmpty else { return clearAPIKey(for: profile) }
-        let isActive = activeProfile?.id == profile.id
-        if KeychainSecretStore.save(value, account: Self.keychainAccount(for: profile.id)) {
-            if isActive {
-                defaults.removeObject(forKey: Key.apiKey) // 同步移除遗留明文，保持单一事实来源
-            }
+        if secrets.save(value, account: Self.keychainAccount(for: profile.id)) {
+            // 新密钥已落该配置自己的条目：归属它的遗留值（若有）视为被取代，清掉避免旧值复活
+            if legacyKeyApplies(to: profile.id) { clearLegacyKeyStorage() }
             notifyLLMConfigChanged()
             return true
         }
-        guard isActive else {
-            Log.config.warning("非生效配置的密钥写入钥匙串失败，已放弃保存（回退明文只会存到当前生效配置）")
-            return false
-        }
+        // 钥匙串不可用：回退到带归属的本地明文。归属记录是本函数安全性的全部前提——
+        // 没有它，这份明文会被下一个生效配置读走。
         defaults.set(value, forKey: Key.apiKey)
+        legacyKeyOwnerID = profile.id
+        Log.config.warning("钥匙串写入失败，密钥已回退本地存储并绑定归属配置 \(profile.id.uuidString.prefix(8))")
         notifyLLMConfigChanged()
         return false
     }
@@ -299,8 +338,9 @@ final class AppConfig {
     /// 一次性迁移（幂等），启动时调用：
     /// 1. 单配置时代的端点三件套（baseURL/model/apiProtocol）→ 首个 APIProfile 并置为生效，
     ///    旧默认 account 的钥匙串密钥随迁到 profile account；
-    /// 2. UserDefaults 遗留明文密钥 → 钥匙串；钥匙串已有值时以其为准直接删明文。
-    /// 迁移失败保持原状（读取链仍会兜底），下次启动重试。
+    /// 2. 遗留密钥（默认钥匙串 account / UserDefaults 明文）→ 归属配置自己的钥匙串条目。
+    /// 归属规则是这里的关键：遗留存储只能归给「迁移时确定的那个配置」，否则切换生效配置后
+    /// 会跟着串到新配置上。迁移失败保持原状并保留归属记录，下次启动重试。
     func migrateLegacyConfigIfNeeded() {
         if apiProfiles.isEmpty {
             let legacyURL = (defaults.string(forKey: Key.baseURL) ?? "")
@@ -313,10 +353,6 @@ final class AppConfig {
                 let profile = APIProfile(
                     apiProtocol: legacyProtocol, baseURL: legacyURL, model: legacyModel
                 )
-                if let legacyKey = KeychainSecretStore.load(), !legacyKey.isEmpty,
-                   KeychainSecretStore.save(legacyKey, account: Self.keychainAccount(for: profile.id)) {
-                    KeychainSecretStore.delete()
-                }
                 apiProfiles = [profile]
                 activeProfileID = profile.id
                 Log.config.info("单配置已迁移为 API 配置列表（1 项）")
@@ -329,17 +365,42 @@ final class AppConfig {
         migrateLegacyKeyIfNeeded()
     }
 
-    /// 遗留明文密钥迁移：钥匙串该 account 已有值则直接删明文；否则迁入成功后再删明文
+    /// 遗留密钥迁移 + 归属确定：
+    /// - 已记录归属：只迁给归属配置；归属配置已被删除则丢弃遗留值（不跟随新的生效项）。
+    /// - 未记录归属（升级自无 owner 的旧版本）：归给当前生效配置，仅此一次。
+    /// - 没有生效配置：保留原状，等建出第一个配置时再归属（见 upsertProfile）。
     private func migrateLegacyKeyIfNeeded() {
-        guard let legacy = defaults.string(forKey: Key.apiKey), !legacy.isEmpty else { return }
-        let account = activeProfile.map { Self.keychainAccount(for: $0.id) } ?? "apiKey"
-        if let existing = KeychainSecretStore.load(account: account), !existing.isEmpty {
-            defaults.removeObject(forKey: Key.apiKey)
-            Log.config.info("钥匙串已有密钥，已移除 UserDefaults 遗留明文")
-        } else if KeychainSecretStore.save(legacy, account: account) {
-            defaults.removeObject(forKey: Key.apiKey)
-            Log.config.info("已将遗留明文密钥迁移至钥匙串")
+        guard let legacyValue = loadLegacyKeyValue() else { return }
+
+        if let owner = legacyKeyOwnerID {
+            guard apiProfiles.contains(where: { $0.id == owner }) else {
+                clearLegacyKeyStorage()
+                Log.config.warning("遗留密钥的归属配置已不存在，已丢弃遗留密钥")
+                return
+            }
+            adoptLegacyKey(legacyValue, into: owner)
+            return
         }
+
+        guard let owner = activeProfile?.id else { return }
+        legacyKeyOwnerID = owner
+        adoptLegacyKey(legacyValue, into: owner)
+    }
+
+    /// 把遗留值写进 owner 自己的钥匙串条目，成功后清空遗留存储
+    private func adoptLegacyKey(_ value: String, into owner: UUID) {
+        let account = Self.keychainAccount(for: owner)
+        if let existing = secrets.load(account: account), !existing.isEmpty {
+            // 该配置已有自己的密钥：遗留值作废（配置自身条目优先级更高）
+            clearLegacyKeyStorage()
+            Log.config.info("配置 \(owner.uuidString.prefix(8)) 已有密钥，已清理归属它的遗留存储")
+            return
+        }
+        if secrets.save(value, account: account) {
+            clearLegacyKeyStorage()
+            Log.config.info("已将遗留密钥迁移至配置 \(owner.uuidString.prefix(8)) 的钥匙串条目")
+        }
+        // 保存失败：保留遗留存储与归属记录，下次启动重试（归属已绑定，不会串给别的配置）
     }
 
     // MARK: - 应用黑名单

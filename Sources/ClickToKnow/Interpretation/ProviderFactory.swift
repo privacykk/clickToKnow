@@ -2,16 +2,35 @@ import Foundation
 
 /// 按配置装配 Provider：有 LLM 配置按所选协议装配客户端，否则用系统词典兜底。
 enum ProviderFactory {
-    /// 读取 AppConfig.shared 当前配置并实例化对应 Provider；每次调用都新建，配置变更即时生效
-    static func make() -> InterpretationProvider {
-        let config = AppConfig.shared
-        guard config.hasLLMConfig else { return SystemDictionaryProvider() }
-        let endpoint = LLMEndpointConfig(
-            baseURL: config.baseURL,
-            apiKey: config.apiKey,
-            model: config.model
+    /// 取当前配置的快照（查询开始时调用一次）。此后本查询不再读 AppConfig，
+    /// 避免响应返回时配置已变导致缓存键/历史归属与实际请求不一致。
+    static func snapshot(from config: AppConfig = .shared) -> QuerySnapshot {
+        let profile = config.activeProfile
+        return QuerySnapshot(
+            profileID: profile?.id,
+            apiProtocol: profile?.apiProtocol ?? .openAICompatible,
+            baseURL: profile?.baseURL ?? "",
+            model: profile?.model ?? "",
+            apiKey: config.effectiveAPIKey(for: profile)
         )
-        switch config.apiProtocol {
+    }
+
+    /// 按快照装配 Provider：快照里已判定走词典时直接返回系统词典实现
+    static func make(_ snapshot: QuerySnapshot) -> InterpretationProvider {
+        guard snapshot.usesLLM else { return SystemDictionaryProvider() }
+        return make(
+            endpoint: LLMEndpointConfig(
+                baseURL: snapshot.baseURL,
+                apiKey: snapshot.apiKey,
+                model: snapshot.model
+            ),
+            apiProtocol: snapshot.apiProtocol
+        )
+    }
+
+    /// 按协议装配 LLM Provider（设置页连接测试与划词共用同一套装配规则）
+    static func make(endpoint: LLMEndpointConfig, apiProtocol: APIProtocol) -> InterpretationProvider {
+        switch apiProtocol {
         case .openAICompatible:
             return OpenAICompatProvider(config: endpoint)
         case .openAIResponses:

@@ -77,8 +77,8 @@ final class AnthropicProvider: InterpretationProvider, LLMPinging {
         do {
             (data, response) = try await session.data(for: request)
         } catch let urlError as URLError {
-            throw InterpretationError.server(
-                LLMProviderSupport.networkHint(urlError, timeoutSeconds: Int(timeout ?? 20))
+            throw LLMProviderSupport.networkError(
+                urlError, timeoutSeconds: Int(timeout ?? 20)
             )
         }
 

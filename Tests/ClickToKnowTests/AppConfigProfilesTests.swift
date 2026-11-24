@@ -7,13 +7,15 @@ import XCTest
 final class AppConfigProfilesTests: XCTestCase {
     private var suiteName: String!
     private var defaults: UserDefaults!
+    private var secrets: TestHelpers.InMemorySecretStore!
     private var config: AppConfig!
 
     override func setUp() {
         super.setUp()
         suiteName = "ctk-test-\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)
-        config = AppConfig(defaults: defaults)
+        secrets = TestHelpers.InMemorySecretStore()
+        config = AppConfig(defaults: defaults, secrets: secrets)
     }
 
     override func tearDown() {

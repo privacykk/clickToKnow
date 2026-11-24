@@ -29,6 +29,26 @@ enum LLMProviderSupport {
         }
     }
 
+    /// 网络错误归类（各 Provider 共用）：请求被取消时（关闭弹窗 / 被新查询取代）
+    /// URLSession 抛的是 `URLError(.cancelled)` 而非 `CancellationError`，直接归类成服务错误
+    /// 会让「关闭弹窗」退化成一次「查询失败」并重新弹窗。这里统一还原成取消语义。
+    static func networkError(_ error: URLError, timeoutSeconds: Int = 20) -> Error {
+        if error.code == .cancelled { return CancellationError() }
+        return InterpretationError.server(networkHint(error, timeoutSeconds: timeoutSeconds))
+    }
+
+    /// 端点主机标识（scheme://host:port，小写）。密钥是按端点授权给出去的，
+    /// 表单里把 Base URL 改到另一台主机后，已存密钥不应再被自动沿用。
+    static func endpointHost(_ rawURL: String) -> String {
+        let trimmed = rawURL.trimmingCharacters(in: .whitespaces)
+        guard let url = URL(string: trimmed), let host = url.host?.lowercased(), !host.isEmpty else {
+            return ""
+        }
+        let scheme = url.scheme?.lowercased() ?? ""
+        let port = url.port.map { ":\($0)" } ?? ""
+        return "\(scheme)://\(host)\(port)"
+    }
+
     /// 非 2xx 时保留响应体片段：401/402 等的 code、message 字段是定位问题的关键
     static func serverError(status: Int, data: Data) -> InterpretationError {
         let snippet = String(decoding: data.prefix(240), as: UTF8.self)

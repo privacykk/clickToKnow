@@ -17,10 +17,10 @@ struct LLMProfileSaveResult {
     let model: String
     /// 是否同时设为当前使用
     let activated: Bool
-    /// 密钥写入钥匙串失败（已回退本地存储，或非生效配置未能保存）
+    /// 密钥未能写入钥匙串，已回退本地存储。
+    /// 回退值带配置归属（见 AppConfig.setAPIKey），因此不再需要区分生效/非生效配置，
+    /// 只需如实告知用户「没进钥匙串」。
     let keychainFallback: Bool
-    /// 非生效配置的密钥完全没能保存（不能回退本地明文，避免串到其他配置）
-    let keySaveFailed: Bool
 }
 
 /// 单个 API 配置的编辑弹窗：新增与编辑共用，保存后由父视图刷新列表。
@@ -51,6 +51,9 @@ struct LLMProfileEditorSheet: View {
     @State private var fetchedModels: [String]?
     @State private var fetchingModels = false
     @State private var fetchError: String?
+    /// 拉取代际号：端点/协议/密钥变动、重新拉取都会 +1，
+    /// 旧端点的慢响应回来时据此丢弃，避免它覆盖新端点的列表与模型选择
+    @State private var fetchGeneration = 0
 
     /// 校验失败与「清除密钥」等即时提示
     @State private var notice: String?
@@ -345,6 +348,9 @@ struct LLMProfileEditorSheet: View {
         if statusModel.keySource == .environment {
             return "密钥已由环境变量 / .env 提供（\(statusModel.maskedKey ?? "")），对所有配置优先生效"
         }
+        if storedKeyBlockedByHostChange {
+            return "端点主机已变更：已存密钥不会自动用于新地址，请重新输入密钥后测试/拉取"
+        }
         if let stored = existingKeyMask {
             return stored.legacy
                 ? "已保存：\(stored.masked)（本地存储，钥匙串不可用已回退）；建议重新输入保存一次"
@@ -379,19 +385,43 @@ struct LLMProfileEditorSheet: View {
         }
     }
 
-    /// 端点三要素（协议/URL/密钥）变动后：测试结果与拉取的模型目录一并作废
+    /// 端点三要素（协议/URL/密钥）变动后：测试结果、拉取的模型目录与在途拉取一并作废
     private func invalidateEndpointDerivations() {
         resetTestState()
+        // 在途的拉取结果已无意义：换代并解除 loading，旧任务回来时会被代际校验丢弃
+        fetchGeneration += 1
+        fetchingModels = false
         fetchedModels = nil
         fetchError = nil
     }
 
-    /// 表单当前值对应的密钥：输入框优先，留空代入该配置已存密钥（含 env），与实际划词行为一致。
-    /// 输入值先清洗（剥空白含换行）：换行混入会令 CFNetwork 丢弃 Authorization 头，表现为「没传 key」
+    /// 表单当前值对应的密钥。
+    ///
+    /// 规则刻意保守：**新增配置一律不借用任何已存密钥**。否则 A 有密钥、新增 B 不填密钥时，
+    /// 「测试连接 / 拉取模型」会把 A 的密钥发往 B 的地址，而保存 B 时并不会复制该密钥，
+    /// 测试通过与真实划词行为也不一致。编辑已有配置时只用它自己的密钥（含归属它的遗留存储），
+    /// 且端点主机变了就不再自动沿用——密钥是按端点授权出去的。
     private func effectiveFormKey() -> String {
         let input = LLMProviderSupport.sanitizedAPIKey(apiKeyInput)
         if !input.isEmpty { return input }
-        return AppConfig.shared.effectiveAPIKey(for: existing ?? AppConfig.shared.activeProfile)
+        let config = AppConfig.shared
+        // 环境变量/.env 对所有配置优先生效，与划词读取链一致
+        if config.apiKeyFromEnvironment { return config.effectiveAPIKey(for: nil) }
+        guard let existing, Self.sameEndpointHost(existing.baseURL, baseURL) else { return "" }
+        return config.effectiveAPIKey(for: existing)
+    }
+
+    /// 表单地址与已存配置是否指向同一主机（scheme://host:port）
+    private static func sameEndpointHost(_ savedURL: String, _ formURL: String) -> Bool {
+        let savedHost = LLMProviderSupport.endpointHost(savedURL)
+        return !savedHost.isEmpty && savedHost == LLMProviderSupport.endpointHost(formURL)
+    }
+
+    /// 端点主机已改动且存在可沿用的已存密钥：测试/拉取不会带上该密钥，需要提示用户重新确认
+    private var storedKeyBlockedByHostChange: Bool {
+        guard let existing, existingKeyMask != nil else { return false }
+        guard LLMProviderSupport.sanitizedAPIKey(apiKeyInput).isEmpty else { return false }
+        return !Self.sameEndpointHost(existing.baseURL, baseURL)
     }
 
     /// 用表单当前值测试（而非已保存值），保存前即可发现问题
@@ -419,17 +449,26 @@ struct LLMProfileEditorSheet: View {
         }
     }
 
-    /// 拉取模型目录：成功后当前模型不在目录里则自动套用第一个
+    /// 拉取模型目录：成功后当前模型不在目录里则自动套用第一个。
+    /// 与连接测试一样走代际校验：端点 A 的慢响应不得覆盖已切到端点 B 的列表与模型选择
     private func fetchModels() {
+        fetchGeneration += 1
+        let generation = fetchGeneration
+        // 输入快照：请求参数与「回来时该不该采用」都以发起时刻为准
+        let requestBaseURL = baseURL
+        let requestProtocol = apiProtocol
+        let requestKey = effectiveFormKey()
         fetchingModels = true
         fetchError = nil
         Task { @MainActor in
             do {
                 let models = try await ModelCatalogFetcher().fetch(
-                    baseURL: baseURL,
-                    apiKey: effectiveFormKey(),
-                    apiProtocol: apiProtocol
+                    baseURL: requestBaseURL,
+                    apiKey: requestKey,
+                    apiProtocol: requestProtocol
                 )
+                // 表单已变动或又发起了新拉取：当前结果已过期，丢弃，且不动 loading 标记
+                guard generation == fetchGeneration else { return }
                 fetchingModels = false
                 fetchedModels = models
                 // 当前模型不在目录里时顺手套用第一个，减少一次手动选择
@@ -438,6 +477,7 @@ struct LLMProfileEditorSheet: View {
                     resetTestState()
                 }
             } catch {
+                guard generation == fetchGeneration else { return }
                 fetchingModels = false
                 fetchedModels = nil
                 fetchError = (error as? InterpretationError)?.userMessage ?? error.localizedDescription
@@ -481,26 +521,13 @@ struct LLMProfileEditorSheet: View {
 
         // 密钥留空 = 保持已存密钥不变（清除走专门按钮，避免误清）
         let keyInput = LLMProviderSupport.sanitizedAPIKey(apiKeyInput)
-        var keychainFallback = false
-        var keySaveFailed = false
-        if !keyInput.isEmpty {
-            // 落库后该配置可能本来就是当前使用项，因此以实际生效项判断回退语义
-            let profileIsActive = config.activeProfile?.id == profile.id
-            let savedToKeychain = config.setAPIKey(keyInput, for: profile)
-            if !savedToKeychain {
-                if profileIsActive {
-                    keychainFallback = true
-                } else {
-                    keySaveFailed = true
-                }
-            }
-        }
+        // 回退到的本地明文会绑定该配置的归属，非生效配置同样可安全保存，因此只有一个「没进钥匙串」标记
+        let keychainFallback = !keyInput.isEmpty && !config.setAPIKey(keyInput, for: profile)
 
         onSaved(LLMProfileSaveResult(
             model: profile.model,
             activated: activate,
-            keychainFallback: keychainFallback,
-            keySaveFailed: keySaveFailed
+            keychainFallback: keychainFallback
         ))
         dismiss()
     }

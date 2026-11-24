@@ -10,7 +10,7 @@ macOS 全局划词释义工具：选中文字 → 按快捷键 → 就地弹出*
 | 单元测试 | `swift test` | 见下文「测试」 |
 | 打包分发 | `./Scripts/package.sh` | `dist/ClickToKnow.app` + `dist/ClickToKnow-<版本>.dmg` / `.zip`，详见下文「打包与分发」 |
 | 固定签名身份（一次性） | `./Scripts/make_signing_cert.sh` | 生成「ClickToKnow Local Signing」证书，覆盖安装不再丢辅助功能授权 |
-| 卸载清理 | `./Scripts/uninstall.sh`（`--dry-run` 预演 / `--all` 连 `.env` 一起删） | 移除 .app、配置 plist 与钥匙串密钥，详见下文「卸载」 |
+| 卸载清理 | `./Scripts/uninstall.sh`（`--dry-run` 预演 / `--purge` 连生词本与 `.env` 一起删） | 移除 .app、配置 plist、全部配置的钥匙串密钥；默认保留生词本，详见下文「卸载」 |
 
 ## 功能
 
@@ -96,24 +96,46 @@ swift test
 
 ### 卸载
 
-直接把 `.app` 拖入废纸篓会**留下残留**：配置 plist、钥匙串里的 API Key、辅助功能授权条目都不会随之删除。完整卸载方式二选一：
+直接把 `.app` 拖入废纸篓会**留下残留**：配置 plist、钥匙串里的 API Key（**每个 API 配置一条**，不是一条）、生词本 `history.json`、辅助功能授权条目都不会随之删除。完整卸载方式二选一：
 
 **一键脚本**（仓库内）：
 
 ```bash
-./Scripts/uninstall.sh          # 退出进程 → 删 .app → 清配置 → 删钥匙串密钥
-./Scripts/uninstall.sh --all    # 连同 ~/.clicktoknow（手动创建的 .env）一起删
-./Scripts/uninstall.sh --dry-run # 预演，只打印不改动
+./Scripts/uninstall.sh           # 默认：卸载应用与凭据，保留生词本与 ~/.clicktoknow
+./Scripts/uninstall.sh --purge   # 彻底卸载：连生词本 history.json 与 ~/.clicktoknow 一起删
+./Scripts/uninstall.sh --dry-run # 预演：逐条打印将执行的操作（含钥匙串目标账号），零副作用
 ```
+
+`--all` 是 `--purge` 的旧名，仍然可用。
+
+脚本的执行顺序是固定的（钥匙串必须在删 `.app` **之前**处理，条目的访问控制只信任原应用）：
+
+1. 退出运行中的进程
+2. 从 `defaults export ClickToKnow` 解析 `apiProfiles`，把每个配置的 `profile-<uuid>` 钥匙串条目**逐个删除并复验**，再删单配置时代的遗留账号 `apiKey`；解析不出配置时降级为只清遗留账号
+3. 清 UserDefaults domain（`ClickToKnow` 与 `com.clicktoknow.app`）
+4. 移除传统 `~/Library/LaunchAgents` 里的同名条目（本应用用 `SMAppService`，通常没有）
+5. 删除 `.app`
+6. 默认**保留** `~/Library/Application Support/ClickToKnow/history.json`（生词本）与 `~/.clicktoknow`（`.env`）；`--purge` 才删
+
+`--dry-run` 只打印：不会调用 `security` 写操作、不会 `defaults delete`、不会 `rm`。
+
+脚本无法代劳、会列在结尾手动清单里的两项：
+
+- **辅助功能授权**：TCC 数据库受 SIP 保护，无法脚本化删除（见下）
+- **开机自启**：`SMAppService` 注册项没有公开 CLI 可注销（`sfltool dumpbtm` 需 root）。最干净的做法是卸载前先在 App 菜单里取消勾选「开机自启」；否则到 **系统设置 → 通用 → 登录项与扩展** 移除条目
 
 **手动卸载**（仅有 DMG/zip 的用户，终端逐条执行）：
 
 ```bash
 osascript -e 'tell application "ClickToKnow" to quit'   # 或先手动退出
-rm -rf /Applications/ClickToKnow.app
-defaults delete ClickToKnow            # 配置 suite（快捷键/Base URL/Model）
+# 钥匙串：每个 API 配置一条（account = profile-<uuid>），外加可能的遗留 account = apiKey
+# 在「钥匙串访问」搜索 ClickToKnow 可看到全部条目；逐个删（省略 -a 时若匹配多条会报错）
+security delete-generic-password -s ClickToKnow -a profile-<uuid>
+security delete-generic-password -s ClickToKnow -a apiKey
+defaults delete ClickToKnow            # 配置 suite（快捷键/凭据归属/API 配置列表）
 defaults delete com.clicktoknow.app    # 系统自动写入的窗口状态等
-security delete-generic-password -s ClickToKnow   # 钥匙串里的 API Key
+rm -rf /Applications/ClickToKnow.app
+rm -rf ~/Library/Application\ Support/ClickToKnow   # 生词本 history.json（想留就跳过这行）
 rm -rf ~/.clicktoknow                  # 若按 README 创建过 .env
 ```
 

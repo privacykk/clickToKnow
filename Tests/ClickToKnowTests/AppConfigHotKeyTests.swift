@@ -15,7 +15,7 @@ final class AppConfigHotKeyTests: XCTestCase {
     override func setUp() {
         super.setUp()
         defaults = UserDefaults(suiteName: suiteName)
-        config = AppConfig(defaults: defaults)
+        config = AppConfig(defaults: defaults, secrets: TestHelpers.InMemorySecretStore())
     }
 
     override func tearDown() {
@@ -44,7 +44,7 @@ final class AppConfigHotKeyTests: XCTestCase {
         XCTAssertEqual(config.hotKeyBinding, binding)
 
         // 新实例回读，验证确实持久化而非内存态
-        let reopened = AppConfig(defaults: defaults)
+        let reopened = AppConfig(defaults: defaults, secrets: TestHelpers.InMemorySecretStore())
         XCTAssertEqual(reopened.hotKeyBinding, binding)
         XCTAssertEqual(reopened.hotKeyBinding.displayString, "⌃⌥⌘J")
     }

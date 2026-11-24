@@ -24,7 +24,9 @@ struct LLMConnectionTester {
         self.makeProvider = makeProvider
     }
 
-    /// apiKey 传空时自动代入当前生效密钥（环境变量/钥匙串），与实际划词行为保持一致。
+    /// 只测表单给什么就用什么：不再在 key 为空时自动代入当前生效配置的密钥。
+    /// 那层隐式回退正是「新增配置借用 A 的密钥发往 B」的来源之一——
+    /// 表单端点已经换掉、密钥却还是别的配置的，测试通过与实际划词行为也不一致。
     func test(baseURL: String, apiKey: String, model: String,
               apiProtocol: APIProtocol = .openAICompatible) async -> Result {
         let trimmedURL = baseURL.trimmingCharacters(in: .whitespaces)
@@ -32,7 +34,9 @@ struct LLMConnectionTester {
         guard !trimmedURL.isEmpty, !trimmedModel.isEmpty else {
             return .failure(reason: "请先填写 Base URL 与 Model")
         }
-        let effectiveKey = apiKey.isEmpty ? AppConfig.shared.apiKey : apiKey
+        // 环境变量/.env 是全局生效的密钥来源（不是某个配置的私钥），可以代入；其余一律不借用
+        let environmentKey = ProcessInfo.processInfo.environment["CLICKTOKNOW_API_KEY"] ?? ""
+        let effectiveKey = apiKey.isEmpty ? environmentKey : apiKey
         let provider = makeProvider(
             .init(baseURL: trimmedURL, apiKey: effectiveKey, model: trimmedModel),
             apiProtocol

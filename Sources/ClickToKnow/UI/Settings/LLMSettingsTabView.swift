@@ -268,10 +268,7 @@ struct LLMSettingsTabView: View {
             ? "已保存并启用「\(result.model)」"
             : "已保存「\(result.model)」（当前使用未变）"
         if result.keychainFallback {
-            text += "；钥匙串不可用，密钥已回退本地存储"
-        }
-        if result.keySaveFailed {
-            text += "；⚠️ 密钥未能写入钥匙串，请切换为当前使用后重新填写"
+            text += "；钥匙串不可用，密钥已回退本地存储（按配置隔离）"
         }
         notice = text
         statusModel.refresh()

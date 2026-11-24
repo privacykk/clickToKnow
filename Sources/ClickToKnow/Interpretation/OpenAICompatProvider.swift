@@ -24,7 +24,7 @@ final class OpenAICompatProvider: StreamingInterpretationProvider, LLMPinging {
         do {
             (data, response) = try await session.data(for: request)
         } catch let urlError as URLError {
-            throw InterpretationError.server(LLMProviderSupport.networkHint(urlError))
+            throw LLMProviderSupport.networkError(urlError)
         }
 
         guard let http = response as? HTTPURLResponse else {
@@ -60,7 +60,7 @@ final class OpenAICompatProvider: StreamingInterpretationProvider, LLMPinging {
         do {
             (bytes, response) = try await session.bytes(for: request)
         } catch let urlError as URLError {
-            throw InterpretationError.server(LLMProviderSupport.networkHint(urlError))
+            throw LLMProviderSupport.networkError(urlError)
         }
 
         guard let http = response as? HTTPURLResponse else {
@@ -149,7 +149,7 @@ final class OpenAICompatProvider: StreamingInterpretationProvider, LLMPinging {
         do {
             (data, response) = try await session.data(for: request)
         } catch let urlError as URLError {
-            throw InterpretationError.server(LLMProviderSupport.networkHint(urlError, timeoutSeconds: 15))
+            throw LLMProviderSupport.networkError(urlError, timeoutSeconds: 15)
         }
         let latency = Date().timeIntervalSince(start)
 
