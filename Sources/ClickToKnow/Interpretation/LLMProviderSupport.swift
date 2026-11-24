@@ -49,11 +49,102 @@ enum LLMProviderSupport {
         return "\(scheme)://\(host)\(port)"
     }
 
-    /// 非 2xx 时保留响应体片段：401/402 等的 code、message 字段是定位问题的关键
+    /// 非 2xx 时给出**可展示的错误摘要**：只保留状态码与白名单字段，不透传原始正文。
+    ///
+    /// 正文直接进 UI / 日志是明确的泄漏面：第三方代理常在错误体里回显请求内容、
+    /// Authorization 头或整段输入；按字节截断还会切出半个 UTF-8 字符（显示成替换符）。
     static func serverError(status: Int, data: Data) -> InterpretationError {
-        let snippet = String(decoding: data.prefix(240), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return .server("HTTP \(status) \(snippet)")
+        .server(serverDetail(status: status, data: data))
+    }
+
+    /// 错误摘要最大字符数（按 Character，不按字节）
+    static let serverDetailLimit = 120
+
+    /// 构造「HTTP 状态码 + 清洗后摘要」的详情串
+    static func serverDetail(status: Int, data: Data, limit: Int = serverDetailLimit) -> String {
+        // 只解开头一段：错误体动辄整页 HTML，没必要全解；解不出的部分随后被清洗掉
+        let body = String(decoding: data.prefix(8 * 1024), as: UTF8.self)
+        let extracted = extractedMessage(from: body) ?? body
+        let cleaned = sanitizeDetail(extracted, limit: limit)
+        return cleaned.isEmpty ? "HTTP \(status)" : "HTTP \(status) \(cleaned)"
+    }
+
+    /// 从错误响应体里挑可定位问题的结构化字段（OpenAI / Anthropic 风格的 error.message 等）。
+    /// 拿不到结构化字段时返回 nil，由调用方退回纯文本清洗。
+    static func extractedMessage(from body: String) -> String? {
+        guard let data = body.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data),
+              let object = parsed as? [String: Any] else { return nil }
+
+        var parts: [String] = []
+        if let error = object["error"] as? [String: Any] {
+            for key in ["type", "code", "message"] {
+                if let value = error[key] as? String, !value.isEmpty { parts.append(value) }
+            }
+        } else if let error = object["error"] as? String, !error.isEmpty {
+            parts.append(error)
+        }
+        for key in ["message", "msg", "error_description", "detail"] {
+            if let value = object[key] as? String, !value.isEmpty { parts.append(value) }
+        }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: " / ")
+    }
+
+    /// 清洗错误摘要：去控制字符与替换符 → 打码凭证 → 压空白 → 按字符截断
+    static func sanitizeDetail(_ text: String, limit: Int) -> String {
+        var stripped = ""
+        for scalar in text.unicodeScalars {
+            if scalar == "\u{FFFD}" { continue } // 容错解码残留的替换符不展示
+            if CharacterSet.controlCharacters.contains(scalar) {
+                if scalar == "\n" || scalar == "\r" || scalar == "\t" { stripped.append(" ") }
+                continue
+            }
+            stripped.unicodeScalars.append(scalar)
+        }
+        // 错误页常是整页 HTML：标签留着只会污染提示（NSTextView 不走 HTML 渲染，但没必要展示）
+        let detagged = strippingTags(from: redactingSecrets(in: stripped))
+        let collapsed = detagged
+            .components(separatedBy: .whitespaces)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard collapsed.count > limit else { return collapsed }
+        return String(collapsed.prefix(limit)) + "…"
+    }
+
+    /// 去掉 HTML/XML 标签（限长匹配，避免病态输入上爆栈）
+    private static let tagPattern = try! NSRegularExpression(pattern: "<[^>]{0,2000}>")
+
+    /// 剥离标签，替换为空格以免相邻文字粘连
+    static func strippingTags(from text: String) -> String {
+        tagPattern.stringByReplacingMatches(
+            in: text,
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: " "
+        )
+    }
+
+    /// 凭证打码：密钥前缀、Bearer 头、超长无分隔串
+    private static let secretPatterns: [NSRegularExpression] = [
+        // sk-xxx / ghp_xxx / xoxb-xxx 之类
+        try! NSRegularExpression(pattern: "(?i)\\b(sk|pk|ghp|gho|ghs|xoxb|xoxp)[-_][A-Za-z0-9_\\-]{6,}"),
+        // Authorization: Bearer xxx
+        try! NSRegularExpression(pattern: "(?i)\\bbearer\\s+[A-Za-z0-9._\\-]{6,}"),
+        // 任意 32 字符以上的无分隔串（Base64 / hex 凭证）
+        try! NSRegularExpression(pattern: "\\b[A-Za-z0-9_\\-]{32,}\\b"),
+    ]
+
+    /// 把疑似凭证替换成 `***`（宁可多打码，也不让错误体把密钥带进 UI 或日志）
+    static func redactingSecrets(in text: String) -> String {
+        var result = text
+        for pattern in secretPatterns {
+            result = pattern.stringByReplacingMatches(
+                in: result,
+                range: NSRange(result.startIndex..., in: result),
+                withTemplate: "***"
+            )
+        }
+        return result
     }
 
     /// 兜底：模型偶尔无视指令仍包一层 ```markdown 围栏，剥掉以免显示噪音。

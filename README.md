@@ -20,16 +20,16 @@ macOS 全局划词释义工具：选中文字 → 按快捷键 → 就地弹出*
 - 无 AI Key 时用 macOS 系统词典兜底（`DCSCopyTextDefinition`）；Ollama 等**免密钥本地服务**填好 Base URL 与 Model 即可直接使用
 - 配 Key 后调用 LLM 做领域感知释义，支持四种 API 协议：OpenAI Chat Completions（通义千问 / DeepSeek / 月之暗面 / Ollama …）、OpenAI Responses、Anthropic Messages、Gemini API；可保存**多套 API 配置**并一键切换，内置供应商预设、**模型目录拉取**与**连接测试**
 - API Key 优先存**钥匙串**（不可用时自动回退本地存储并在状态页标注）
-- NSPanel 悬浮窗就地展示：不抢焦点、跟随系统亮暗外观、点击外部 / 超时 / `Esc` 关闭，关闭时自动取消在途请求
+- NSPanel 悬浮窗就地展示：不抢焦点、跟随系统亮暗外观、点击外部 / 超时 / `Esc` 关闭，关闭时自动取消在途请求；鼠标悬停期间暂停倒计时（长释义不会读到一半被关掉）
 - **取词失败可见反馈**：未授权 / 安全输入态（密码框）/ 黑名单应用 / 空选择 / 超时分别给出可操作提示，不再静默无反应
 - **AX 直读为主路径**：不碰剪贴板、对禁复制应用有效，弹窗贴选区（而非鼠标）展示，选区前后文随查询发送（LLM 领域判断更准）；未实现 AX 的应用自动回退模拟 ⌘C
-- **SSE 流式输出**（OpenAI 兼容协议）：弹窗边收边渲染，长释义不再有数秒白屏
+- **SSE 流式输出**（OpenAI 兼容协议）：弹窗边收边渲染，增量按 20fps 合并后再排版（长内容不卡主线程），长释义不再有数秒白屏
 - **进程内查询缓存**：同一词条（含供应商 + 模型指纹）重复查询零延迟零费用
 - **历史记录（生词本）**：查询自动落盘（上限 500 条），菜单栏「历史记录…」按日分组浏览，支持关键词搜索、来源筛选、单条删除与清空确认，可按当前筛选导出 CSV / Anki TSV
 - **应用黑名单**：密码 / 密钥管理类应用（1Password、钥匙串访问等）内置不抓取，`defaults write ClickToKnow blacklistedBundleIDs -array <bundleID>` 可追加
 - 菜单栏**暂停取词**开关（投屏 / 演示 / 输密码场景）与**开机自启**开关（SMAppService，打包为 .app 后生效）
 - 分级日志（os.Logger，`log show --predicate 'subsystem == "ClickToKnow"'`）与**诊断信息导出**（状态页，脱敏）
-- 选词抓取后自动恢复用户原有剪贴板（⌘C 兜底路径）；安全输入态（密码框聚焦）主动跳过抓取
+- 选词抓取后自动恢复用户原有剪贴板（⌘C 兜底路径）；安全输入态（密码框聚焦）主动跳过抓取；等待期间前台应用切换则取消本次抓取，不去复制别处的内容
 
 ## 运行
 
@@ -50,7 +50,7 @@ swift run
 swift test
 ```
 
-覆盖键码翻译、密钥掩码、预设反查、快捷键持久化与连接测试分类（网络经 URLProtocol mock，不发真实请求）。
+覆盖键码翻译、密钥掩码、预设反查、快捷键持久化与连接测试分类（网络经 URLProtocol mock，不发真实请求）；密钥隔离与回退归属、缓存键（来源 / 上下文 / 大小写）、查询代际失效、流式增量合并、自动关闭悬停冻结、取词事务（互斥释放时机 / 目标切换）、错误正文脱敏均由可注入替身覆盖，不触碰真实钥匙串、剪贴板与辅助功能授权。
 
 ## 打包与分发
 
@@ -185,11 +185,11 @@ cp .env.example .env
 Sources/ClickToKnow/
 ├── ClickToKnowApp.swift        入口（regular 激活策略，启动即展示主窗口）
 ├── App/                        AppDelegate / 菜单栏（动态状态 + 暂停/自启/历史入口）/ 设置窗口壳 / 系统设置直达
-├── Selection/                  全局快捷键（配置化 + 热重注册）+ AX 直读（主）+ ⌘C 抓词（兜底）+ 剪贴板快照恢复 + 键码翻译
+├── Selection/                  全局快捷键（配置化 + 热重注册）+ AX 直读（异步 + messaging timeout）+ ⌘C 抓词事务（兜底，互斥持有到快照恢复完成）+ 键码翻译
 ├── Interpretation/             Provider 协议（含流式可选能力）+ 系统词典 + 四种 API 协议实现（OpenAI Chat Completions 含 SSE 流式）+ 模型目录拉取 + 连接测试门面 + 查询缓存
 ├── Config/                     UserDefaults 配置（多 API 配置 + 应用黑名单）/ 钥匙串密钥存储（按配置隔离）/ 供应商预设 / 分级日志（os.Logger）
 ├── Status/                     运行时状态聚合（AppStatusModel）+ 辅助功能授权三态与失效识别 + 历史记录持久化（HistoryStore）
-└── UI/                         NSPanel 悬浮窗 + Markdown 渲染（弹窗 NSAttributedString / SwiftUI 双实现）+ SwiftUI 设置页（三 Tab）+ 历史记录窗口（搜索 / 筛选 / 导出）
+└── UI/                         NSPanel 悬浮窗（自动关闭状态机：悬停冻结）+ Markdown 渲染（弹窗 NSAttributedString / SwiftUI 双实现）+ SwiftUI 设置页（三 Tab）+ 历史记录窗口（搜索 / 筛选 / 导出）
 Packaging/                      Info.plist 模板 + 应用图标（Scripts/make_icon.swift 程序化生成）
 Scripts/                        package.sh 一键打包（默认 universal binary）/ make_signing_cert.sh 本机固定签名身份 / uninstall.sh 卸载清理 / make_icon.swift 图标生成
 Tests/ClickToKnowTests/         纯逻辑单测 + URLProtocol mock 集成测试（含 SSE 流式与历史导出用例）
@@ -201,6 +201,7 @@ Tests/ClickToKnowTests/         纯逻辑单测 + URLProtocol mock 集成测试�
 - 系统设置里「条目还在却显示未授权」是 ad-hoc 签名换版后的典型症状：状态总览会标为「授权已失效」并提供「修复授权」（重置 TCC 条目 + 重新弹授权），无需再手动移除条目后重新添加。
 - 默认打包产物为 universal binary（arm64 + x86_64）；只需单架构可 `ARCHS=arm64 ./Scripts/package.sh`（构建更快、产物更小）。
 - Anthropic / OpenAI Responses / Gemini 协议暂为非流式整包（OpenAI Chat Completions 协议已支持 SSE 流式）。
+- 弹窗是 `nonactivating` 面板，不抢焦点，因此 `Esc` 关闭依赖**全局**监视器；macOS 不允许全局监视器消费事件，所以按下 `Esc` 时原应用也会收到这次按键（例如在全屏视频里 Esc 会同时退出全屏）。不使用「全局事件拦截（CGEventTap）」是刻意的：那会吞掉其他应用的 `Esc`，属于明显的系统级行为回归。
 
 ## 后续（阶段 3）
 

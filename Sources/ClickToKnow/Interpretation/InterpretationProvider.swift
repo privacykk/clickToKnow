@@ -44,4 +44,17 @@ enum InterpretationError: Error {
             return "服务返回错误：\(detail)"
         }
     }
+
+    /// 日志用分类：只带错误类型与 HTTP 状态码，**不含服务端正文**。
+    /// 正文可能回显密钥或用户选中文本，日志系统不该承担这个泄漏面。
+    var logCategory: String {
+        switch self {
+        case .notFound: return "notFound"
+        case .badResponse: return "badResponse"
+        case .badConfiguration: return "badConfiguration"
+        case .server(let detail):
+            let status = detail.split(separator: " ").dropFirst().first.map(String.init) ?? "unknown"
+            return "server(status=\(status))"
+        }
+    }
 }

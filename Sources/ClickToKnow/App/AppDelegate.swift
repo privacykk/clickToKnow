@@ -147,6 +147,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             当前应用复制响应较慢，或禁止复制（部分 PDF / 密码管理器）。
             """
+        case .targetChanged:
+            message = """
+            **已跳过本次查询**
+
+            等待取词期间前台应用已切换。为避免复制到其他应用的内容，本次抓取已取消；请重新选中文字后再按快捷键。
+            """
         }
         popover?.show(MarkdownRenderer.render(message), at: location, autoCloseAfter: 8)
     }
@@ -202,11 +208,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 let result: Interpretation
                 if let streaming = provider as? StreamingInterpretationProvider {
-                    // 流式：每个增量重渲染弹窗，用户边收边看；onDelta 已在主 actor
+                    // 流式：增量按帧合并后再渲染（每个 delta 都全量解析 Markdown + 测高 + 定位
+                    // 在长内容下都是主线程开销）；合并后只更新内容，不重装监视器、不重排倒计时，
+                    // 否则悬停暂停每分钟都会被覆盖
+                    let coalescer = StreamingCoalescer { [weak self] partial in
+                        guard let self, self.querySession.isCurrent(requestID) else { return }
+                        self.popover?.updateContent(MarkdownRenderer.render(partial))
+                    }
                     result = try await streaming.interpretStreaming(text, context: context) { partial in
                         guard let self, self.querySession.isCurrent(requestID) else { return }
-                        self.popover?.show(MarkdownRenderer.render(partial), at: location, autoCloseAfter: 25)
+                        coalescer.push(partial)
                     }
+                    coalescer.flush()
                 } else {
                     result = try await provider.interpret(text, context: context)
                 }
@@ -220,7 +233,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self, self.querySession.isCurrent(requestID) else { return }
                 let message = (error as? InterpretationError)?.userMessage
                     ?? "查询失败：\(error.localizedDescription)"
-                Log.llm.error("释义失败：\(message)")
+                // 日志只记类别与状态码：服务端正文可能回显密钥或选中文本，不写入日志系统
+                if let interpretationError = error as? InterpretationError {
+                    Log.llm.error("释义失败：\(interpretationError.logCategory)")
+                } else {
+                    Log.llm.error("释义失败：\(type(of: error))")
+                }
                 self.showFailure(message, for: text, at: location)
             }
         }

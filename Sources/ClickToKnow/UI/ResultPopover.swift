@@ -13,13 +13,14 @@ final class ResultPopover {
     private let textView: NSTextView
     /// 点击外部关闭的全局监视器
     private var dismissMonitor: Any?
-    /// Esc 关闭的本地监视器
+    /// Esc 关闭的本地监视器（事件投递给本进程时生效）
     private var keyMonitor: Any?
-    /// 自动关闭任务（悬停时可取消重排）
-    private var autoCloseItem: DispatchWorkItem?
-
-    /// 当前展示使用的自动关闭时限（悬停暂停倒计时时要用）
-    private var autoCloseDuration: TimeInterval = 15
+    /// Esc 关闭的全局监视器（原应用保持焦点时唯一能收到 Esc 的途径）
+    private var globalKeyMonitor: Any?
+    /// 自动关闭状态机（悬停冻结 / 移开重排，唯一排定入口）
+    private let autoClose = AutoCloseScheduler()
+    /// 最近一次展示的锚点：内容更新时沿用它重新定位，弹窗不会因流式内容增多而跳走
+    private var lastAnchor: NSPoint = .zero
 
     /// 弹窗关闭时回调（点击外部 / 超时 / Esc）：AppDelegate 借此取消仍在进行的 LLM 请求，避免白烧 token
     var onClose: (() -> Void)?
@@ -74,6 +75,9 @@ final class ResultPopover {
         }
         container.addSubview(scrollView)
         panel.contentView = container
+        autoClose.onFire = { [weak self] in
+            self?.close()
+        }
     }
 
     /// 跟随系统亮暗外观：cgColor 是快照，弹窗生命周期短（≤25s），每次展示时刷新一次即可
@@ -82,10 +86,26 @@ final class ResultPopover {
         container.layer?.borderColor = NSColor.separatorColor.cgColor
     }
 
-    /// 展示弹窗：按内容测高定尺寸，锚点贴调用方给定的屏幕位置并 clamp 进可视区。
-    /// 每次展示重装监视器与倒计时（loading 增量复用同一弹窗刷新内容）。
+    /// 首次展示（或切换到一条新内容）：定尺寸定位 → 装监视器 → 排倒计时 → 上屏。
+    /// 流式增量请走 `updateContent`，否则每帧重装监视器与重排倒计时会把悬停暂停覆盖掉。
     func show(_ attributed: NSAttributedString, at mouse: NSPoint, autoCloseAfter: TimeInterval = 15) {
-        autoCloseDuration = autoCloseAfter
+        lastAnchor = mouse
+        layout(attributed, at: mouse)
+        addDismissMonitor()
+        addKeyMonitor()
+        autoClose.restart(duration: autoCloseAfter)
+        panel.orderFront(nil)
+    }
+
+    /// 仅更新内容：沿用首次展示的锚点重排尺寸，不碰监视器、不重排倒计时。
+    /// 增量可能非常密集（每个 SSE delta 一次），这里刻意保持最小动作。
+    func updateContent(_ attributed: NSAttributedString) {
+        guard panel.isVisible else { return }
+        layout(attributed, at: lastAnchor)
+    }
+
+    /// 按固定宽度测高、定位并 clamp 进可视区（show 与 updateContent 共用）
+    private func layout(_ attributed: NSAttributedString, at mouse: NSPoint) {
         applyAppearance()
 
         let pad = Self.padding
@@ -120,24 +140,22 @@ final class ResultPopover {
         if y + height > visible.maxY { y = visible.maxY - height - 8 }
 
         panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
-        addDismissMonitor()
-        addKeyMonitor()
-        scheduleAutoClose()
-        panel.orderFront(nil)
     }
 
     /// 关闭弹窗：清理监视器与倒计时并通知 onClose（幂等）
     func close() {
         removeDismissMonitor()
         removeKeyMonitor()
-        autoCloseItem?.cancel()
-        autoCloseItem = nil
+        autoClose.invalidate()
         panel.orderOut(nil)
         onClose?()
     }
 
-    /// Esc 关闭：panel 是 nonactivating 不会成为 key window，键事件仍发往原焦点应用，
-    /// 因此用本地监视器在事件分发前拦截；消费掉 Esc（return nil），避免前景应用二次响应
+    /// Esc 关闭。两条路径缺一不可：
+    /// - 本地监视器：设置窗口等本进程窗口获得焦点时，能在事件分发前消费掉 Esc；
+    /// - 全局监视器：弹窗是 nonactivating 的、原应用保持焦点，此时键事件根本不进本进程，
+    ///   只有全局监视器能收到。全局监视器无法消费事件（macOS 不提供），
+    ///   因此原应用仍会收到这次 Esc —— README 已按此说明。
     private func addKeyMonitor() {
         removeKeyMonitor()
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -145,39 +163,32 @@ final class ResultPopover {
             self.close()
             return nil
         }
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53 else { return }
+            self?.close()
+        }
     }
 
-    /// 移除 Esc 监视器
+    /// 移除 Esc 监视器（本地 + 全局）
     private func removeKeyMonitor() {
         if let monitor = keyMonitor {
             NSEvent.removeMonitor(monitor)
             keyMonitor = nil
         }
+        if let monitor = globalKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalKeyMonitor = nil
+        }
     }
 
-    /// 悬停期间冻结自动关闭倒计时，移开后重新计时
+    /// 悬停期间冻结自动关闭倒计时，移开后重新计时（状态由 AutoCloseScheduler 保存）
     private func hoverChanged(_ hovering: Bool) {
-        if hovering {
-            autoCloseItem?.cancel()
-            autoCloseItem = nil
-        } else {
-            scheduleAutoClose()
-        }
+        autoClose.hoverChanged(hovering)
     }
 
     /// 点所在屏幕（多点时按坐标找所在屏）
     private static func screen(for point: NSPoint) -> NSScreen? {
         NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) } ?? NSScreen.main
-    }
-
-    /// 重排自动关闭倒计时（展示与悬停移开时调用）
-    private func scheduleAutoClose() {
-        autoCloseItem?.cancel()
-        let item = DispatchWorkItem { [weak self] in
-            self?.close()
-        }
-        autoCloseItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + autoCloseDuration, execute: item)
     }
 
     /// 点击弹窗外任意位置即关闭（全局监视；点击弹窗自身不触发）
