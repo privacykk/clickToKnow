@@ -2,6 +2,8 @@
 
 对应文档：`docs/project-review-2026-11-24.md`。基线提交 `5582217`，本次工作在分支 `fix/correctness-batch-1`。
 
+本文档记录两轮工作：批次 1（修正确性）与批次 2（稳住交互）+ 工程优化项。批次 2 与工程项为后续追加。
+
 核查方式：4 个只读核查代理并行取证（只读代码与 git 历史，未改文件、未跑构建），逐条以「代码逐字摘录 + 调用链 + 触发序列 + 现有测试覆盖」判定结论；随后由主代理统一实施批次 1 修复。基线与本轮验证均在 `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`、`swift build --disable-sandbox` 下执行（仅装 CommandLineTools 时 SwiftUI 宏插件缺失，构建会失败）。
 
 ## 一、逐条核查结论
@@ -80,11 +82,53 @@ swift test --disable-sandbox    # 136 tests, 0 failures
 
 `Scripts/uninstall.sh` 额外验证：`bash -n` 通过；子任务用假 `PATH`（`defaults`/`security`/`pgrep`/`osascript`/`launchctl`/`rm` 桩）跑了 10 组用例共 86 条断言，覆盖 dry-run 零副作用、真实调用序列与顺序、`--purge`/`--all`、无配置与坏配置降级、授权被拒逐条报错。本机真实 `--dry-run` 也确认：能从实际配置正确解析出 `profile-<uuid>` 并只打印、不触碰钥匙串。
 
-## 四、未修复（明确留待后续批次）
+## 四、批次 2 已修复（稳住交互）
 
-- 问题 5（AX 异步化与 messaging timeout）、6（剪贴板事务）、7（Esc 与悬停）、9（错误正文脱敏）：属于批次 2「稳住交互」与体验项，本次未动。其中问题 7 的 README「点击外部 / 超时 / Esc 关闭」承诺当前仍不准确，需与实现一起校正。
-- 批次 2 之后的高频体验与产品化项（结果操作栏、隐私设置页、模板与语言、全协议流式、生词本、更新入口）未动。
-- 缓存命中率下降：上下文入键后的已知代价，需要领域摘要才能补回，本轮以正确性优先。
-- 仍需实机验收：真实后台应用的 AX 时序、连续快捷键下的剪贴板内容、跨应用 Esc、钥匙串授权被拒时的删除复验、辅助功能 TCC 与 `SMAppService` 残留清理。
+### 6. AX 异步化（问题 5）
+
+- `AXSelectionReader.read()` 改为 `async` + `withCheckedContinuation`：工作线程与超时定时器竞争同一个 continuation，由 `ResumeGate` 保证只 resume 一次；**主线程不再 `semaphore.wait` 阻塞**。
+- 新增 `AXUIElementSetMessagingTimeout(appElement/element, 0.2)`：此前系统默认 6s，远大于 400ms 预算，超时返回后后台线程仍挂在 IPC 上，快速连按会累积未完成调用。
+- `SelectionMonitor` 取词全程持有互斥（一次只允许一个 AX 读取），并用代际号 `readToken` 丢弃过期结果；暂停时递增代际。
+- 兜底前 `revalidate(target:)` 复核：目标 pid 未变、仍非安全输入、仍非黑名单；目标已切换则新增 `SelectionFailure.targetChanged` 并给出可操作提示，绝不复制别处的内容。
+- 依赖通过 `Environment` / `SelectionReading` / `PasteboardAccess` / `DelayScheduling` 注入，测试无需辅助功能授权。
+
+### 7. 剪贴板事务（问题 6）
+
+- 新增 `PasteboardAccess` 协议；`restoreSnapshot` 改为带 `completion`：**互斥一直持有到快照真正恢复完成**。此前 `finish()` 在排程恢复后立即放锁，第二次查询能赶在 300ms 恢复窗口内保存快照，把本次复制的词条当成「用户原始剪贴板」。
+- 事务带 `token`：被暂停/新查询取代时，仍恢复快照但拒绝交付结果。
+- 未采用「changeCount 跳变即判定第三方写入」的启发式：不少应用一次 ⌘C 会 `clearContents` + `writeObjects`（计数跳 2），按跳变拒绝会误杀正常取词；恢复前仍以 `changeCount == readCount` 作为不覆盖第三方内容的条件。
+
+### 8. Esc 与悬停（问题 7）
+
+- 新增 `AutoCloseScheduler` 状态机：`isHovering` 由它持有，悬停期间 `restart(duration:)` 直接拒绝排定——这是「流式内容每帧重排定时器、把悬停冻结覆盖掉」的根因修复。
+- `ResultPopover.show()` 拆为「首次展示（装监视器 + 排倒计时）」与 `updateContent`（只重排内容，锚点沿用首次展示位置）。
+- Esc 补 `addGlobalMonitorForEvents`（原应用保持焦点时唯一可达路径），本地监视器继续负责可消费场景。README「已知限制」明确：全局监视器无法消费事件，原应用仍会收到该 Esc；不使用 CGEventTap 是有意取舍（否则会吞掉所有应用的 Esc）。
+
+### 9. 错误正文脱敏（问题 9）
+
+- `serverError` 改为「状态码 + 白名单字段（`error.type` / `error.code` / `error.message` 等）」；非 JSON 走纯文本清洗。
+- 清洗链：去控制字符与 U+FFFD → 剥 HTML 标签 → 凭证打码（`sk-`/`Bearer`/≥32 字符无分隔串）→ 压空白 → **按 Character 截断**（旧实现按字节 `prefix(240)` 会切出半个 UTF-8 字符）。
+- 新增 `InterpretationError.logCategory`：日志只记 `server(status=401)` 这类类别，不再写入服务端正文。设置页「拉取模型 / 测试连接」的同一路径自动受益。
+
+### 10. 流式渲染合并（性能项 1）
+
+- 新增 `StreamingCoalescer`：50ms 窗口合并增量，只交付最新文本，流式结束 `flush()` 保证末帧落地；时间源与调度器可注入。
+- 增量改走 `updateContent`，不再每帧重装监视器/重排倒计时。100 个 delta 的突发场景单测断言渲染次数 < 10。
+
+## 五、工程优化项已修复
+
+- **历史异步写入与损坏恢复**（工程项 2）：新增 `HistoryFileWriter`（串行后台队列 + 合并写，只落盘最新快照）；损坏文件不再静默返回空数组，而是备份为 `history.corrupt-<时间戳>.json` 并在历史窗口顶部给出橙色告警；`applicationWillTerminate` 前 `flush()`。
+- **统一结果渲染解析**（工程项 3）：新增 `MarkdownDocument` 共享块级/行内解析，弹窗 `MarkdownRenderer` 与历史详情 `MarkdownText` 共用；弹窗侧补齐标题、有序列表、引用、代码块、分隔线、行内代码与链接。表格明确不支持（按段落原样显示，不静默丢内容）。
+- **人工验收清单**（工程项 4）：新增 `docs/acceptance-checklist.md`，覆盖 A 取词主路径、B 剪贴板事务、C 弹窗交互、D 日志脱敏、E 密钥隔离、F 缓存、G 历史、H 卸载、I 发布门禁，并列出待补验证项。
+- **发布门禁**（工程项 5）：`release.yml` 新增 `verify` job（`swift build` + `swift test`），`build-release` 依赖它——tag 推送此前完全不跑测试；新增产物完整性校验（存在、非空、`hdiutil verify`）；重跑发布改为「`--clobber` 覆盖同名产物 → 清理过期附件」，消除「先删全部附件再上传」的空窗。
+- **闭包捕获警告**（工程项 6 的一部分）：基线 `AppDelegate.swift:168` 的警告已清除，构建零警告。
+
+## 六、未修复（明确留待后续批次）
+
+- **批次 3 高频体验**（结果操作栏、隐私设置页、释义模板与语言、全协议流式）与**批次 4 产品化**（收藏复习、更新入口、自动触发触发方式）未动：这些会改变 UI/交互设计，需要产品决策，未擅自实现。
+- **工程项 6 的其余部分**（provider 与 URLSession 按不可变配置复用）：评审明确要求「先用 Instruments 检查，再决定重构幅度」，本轮未做性能剖析，不做无依据重构。
+- **工程项 7 诊断增强**（最近取词路径 / AX 与网络耗时 / 首 token 耗时 / 缓存命中 / 最近失败类别）：本轮已让日志不再含正文（`logCategory`），但结构化耗时指标未加，留待后续。
+- **缓存命中率下降**：上下文入键后的已知代价，需要领域摘要才能补回，本轮以正确性优先。
+- **仍需实机验收**：见 `docs/acceptance-checklist.md`；其中 macOS 13 与 Intel 实机验证、真实钥匙串授权被拒后的删除复验、辅助功能 TCC 与 `SMAppService` 残留清理未覆盖。
 
 本次核查未修改任何评审原文；业务代码改动仅限上述批次 1 范围。

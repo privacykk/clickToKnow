@@ -13,7 +13,21 @@ permissions:
   contents: write # 创建 Release、上传附件需要写权限
 
 jobs:
+  # 发布前必须验证同一提交能构建并通过测试：tag 推送不会触发 ci.yml（它只覆盖分支推送），
+  # 此前等于「未测试的提交直接进 Release」。verify 失败则 build-release 不会执行。
+  verify:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建
+        run: swift build
+
+      - name: 单元测试
+        run: swift test
+
   build-release:
+    needs: verify
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +54,22 @@ jobs:
           APPEND_TIMESTAMP: '0'
           BUILD_NUMBER: ${{ github.run_number }}
         run: ./Scripts/package.sh
+
+      - name: 校验产物完整性
+        if: steps.meta.outputs.skip == 'false'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          # 产物名由 package.sh 决定（APPEND_TIMESTAMP=0 时确定），先断言存在且非空，
+          # 避免把空文件/半截文件发到 Release
+          for ext in dmg zip; do
+            f="dist/ClickToKnow-${VERSION}.${ext}"
+            [ -f "$f" ] || { echo "缺少产物：$f" >&2; ls -l dist >&2; exit 1; }
+            [ -s "$f" ] || { echo "产物为空：$f" >&2; exit 1; }
+            ls -lh "$f"
+          done
+          # DMG 结构自检（不挂载）：损坏的磁盘映像不应上传
+          hdiutil verify "dist/ClickToKnow-${VERSION}.dmg" >/dev/null && echo "DMG 结构校验通过"
 
       - name: 上传构建产物
         if: steps.meta.outputs.skip == 'false'
@@ -73,14 +103,25 @@ jobs:
 
           FILES=(dist/*.dmg dist/*.zip)
           if gh release view "$TAG" >/dev/null 2>&1; then
-            # 重跑时先清空旧附件：否则版本号变化后新旧文件名并存，用户会下到过期安装包
-            echo "Release 已存在，清空旧附件后重新上传"
-            gh release view "$TAG" --json assets --jq '.assets[].name' > stale-assets.txt
-            while IFS= read -r ASSET; do
-              [ -n "$ASSET" ] || continue
-              gh release delete-asset "$TAG" "$ASSET" --yes
-            done < stale-assets.txt
-            gh release upload "$TAG" "${FILES[@]}"
+            # 重跑时不先清空附件（那会留下一段「Release 里没有安装包」的空窗）：
+            # 先用 --clobber 覆盖同名产物，再删掉不属于本次产物的过期附件。
+            echo "Release 已存在，覆盖同名产物后清理过期附件"
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+
+            # 期望附件名 = 本次产物的文件名；其余（旧版本号遗留）逐个删除
+            for FILE in "${FILES[@]}"; do
+              basename "$FILE"
+            done | sort > expected-assets.txt
+            gh release view "$TAG" --json assets --jq '.assets[].name' | sort > current-assets.txt
+            comm -13 expected-assets.txt current-assets.txt > stale-assets.txt
+            if [ -s stale-assets.txt ]; then
+              while IFS= read -r ASSET; do
+                [ -n "$ASSET" ] || continue
+                echo "删除过期附件：$ASSET"
+                gh release delete-asset "$TAG" "$ASSET" --yes
+              done < stale-assets.txt
+            fi
+
             # 该 tag 曾被删除再重建时，GitHub 会把原 Release 转成草稿（草稿对外不可见），
             # 这里显式发布；对已发布的 Release 是无副作用的空操作
             gh release edit "$TAG" --draft=false

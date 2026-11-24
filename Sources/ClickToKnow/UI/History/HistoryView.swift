@@ -16,6 +16,8 @@ struct HistoryView: View {
     @State private var sourceFilter: HistoryFilter.Source = .all
     /// 清空确认弹窗开关
     @State private var pendingClear = false
+    /// 启动加载时的问题（如历史文件损坏已备份）：顶部常驻提示，避免用户以为数据莫名消失
+    @State private var loadWarning: String?
     /// 底部状态栏的短提示（导出 / 删除 / 清空结果）
     @State private var notice: String?
     /// 提示是否为失败态（决定文字颜色）
@@ -54,6 +56,9 @@ struct HistoryView: View {
     /// 侧栏：搜索框 + 来源胶囊 + 分组列表 + 底部计数
     private var sidebar: some View {
         VStack(spacing: 0) {
+            if let loadWarning {
+                warningBanner(loadWarning)
+            }
             VStack(spacing: 8) {
                 searchField
                 filterBar
@@ -72,6 +77,31 @@ struct HistoryView: View {
 
             footer
         }
+    }
+
+    /// 顶部告警横幅：只在启动加载出问题时出现（如原文件损坏已备份），不占常驻空间
+    private func warningBanner(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(.orange)
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button {
+                loadWarning = nil
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9))
+            }
+            .buttonStyle(.plain)
+            .help("已知悉，隐藏提示")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.12))
     }
 
     /// 自绘搜索框：系统 .searchable 依赖工具栏，这里在侧栏内固定展示更稳定
@@ -413,6 +443,7 @@ struct HistoryView: View {
     /// 从 HistoryStore 重新拉取，并尽量保留当前选中项
     private func reload() {
         entries = HistoryStore.shared.entries
+        loadWarning = HistoryStore.shared.loadWarning
         if let selection, entries.contains(where: { $0.id == selection }) {
             return
         }

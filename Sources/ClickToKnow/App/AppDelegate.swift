@@ -45,6 +45,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.app.info("LLM 配置：\(AppConfig.shared.hasLLMConfig ? "已就绪" : "未配置（回落到系统词典）")")
     }
 
+    /// 退出前把后台排队中的历史记录写完（写入是异步合并的，不 flush 会丢掉最后几条）
+    func applicationWillTerminate(_ notification: Notification) {
+        HistoryStore.shared.flush()
+    }
+
     /// 点击 Dock 图标 / Finder 重复启动时，若设置窗口不可见则重新打开。
     /// 不能只看 hasVisibleWindows：划词结果 NSPanel 也是窗口，展示期间会挡住 Dock 唤起。
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
