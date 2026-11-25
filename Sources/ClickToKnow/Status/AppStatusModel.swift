@@ -117,6 +117,7 @@ final class AppStatusModel: ObservableObject {
         case .ready:
             return "大模型 · \(activeModel)"
         case .missingKey:
+            if keySource == .keychainNeedsAuthorization { return "密钥需要授权（当前使用系统词典）" }
             return "已配置「\(activeModel)」但缺少 API Key（当前回落系统词典）"
         case .notConfigured:
             return "系统词典（未配置 LLM）"
@@ -162,7 +163,7 @@ final class AppStatusModel: ObservableObject {
     }
 
     /// 幂等全量拉取：轮询、菜单展开、Tab 切入、保存配置后都会调用。
-    /// 钥匙串读取经 KeychainSecretStore 内存缓存，秒级频率不会反复触发系统询问。
+    /// 状态读取使用静默钥匙串查询和进程内缓存。
     func refresh() {
         accessibilityState = grantRecord.state(
             trusted: AXIsProcessTrusted(),

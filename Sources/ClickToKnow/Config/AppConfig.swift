@@ -1,7 +1,7 @@
 import Foundation
 
 /// 应用配置，UserDefaults 持久化（线程安全，无需主线程隔离）。
-/// 密钥读取优先级：环境变量（含 .env 注入）→ 钥匙串 → UserDefaults（遗留明文）。
+/// 密钥读取优先级：环境变量 → 本次运行 → 钥匙串 → 已归属的遗留明文。
 final class AppConfig {
     static let shared = AppConfig()
 
@@ -16,6 +16,8 @@ final class AppConfig {
     private let defaults: UserDefaults
     /// 密钥存储（生产 = 钥匙串）；单测注入可失败实现以覆盖回退与隔离路径
     private let secrets: any SecretStoring
+    private let sessionKeyLock = NSLock()
+    private var sessionKeys: [UUID: String] = [:]
 
     private init() {
         // 显式 suite，配置固定写入 ~/Library/Preferences/ClickToKnow.plist，
@@ -57,8 +59,10 @@ final class AppConfig {
     /// 密钥当前生效来源，用于状态页/设置页展示
     enum APIKeySource: String {
         case environment         // 环境变量 / .env（EnvLoader 注入 env 后两者不可分辨，UI 文案合并展示）
+        case session
         case keychain
-        case legacyUserDefaults  // 迁移未成功的遗留明文（钥匙串不可用时的回退）
+        case legacyUserDefaults
+        case keychainNeedsAuthorization
         case none
     }
 
@@ -122,36 +126,58 @@ final class AppConfig {
         }
         apiProfiles = profiles
         // 首个配置出现时收编无主的遗留密钥：此时 owner 唯一可选，不会串给别的配置
-        if isFirstProfile, legacyKeyOwnerID == nil, let value = loadLegacyKeyValue() {
-            legacyKeyOwnerID = profile.id
-            adoptLegacyKey(value, into: profile.id)
-        }
+        if isFirstProfile { assignLegacyKeyOwnerIfNeeded(to: profile.id) }
         return profile
     }
 
-    /// 修改端点来源前，必须先确认旧密钥已移除，再保存地址。
-    func saveEditedProfile(_ profile: APIProfile) -> Bool {
-        if let previous = apiProfiles.first(where: { $0.id == profile.id }),
-           !LLMProviderSupport.sameEndpointHost(previous.baseURL, profile.baseURL),
-           !clearAPIKey(for: previous) {
-            return false
+    enum ProfileSaveResult: Equatable {
+        case saved(APIProfile), oldKeyNotCleared, keyNotSaved
+    }
+
+    /// 修改端点来源时，保存前确认旧密钥已移除。
+    func saveEditedProfile(_ profile: APIProfile, key: String = "", sessionOnly: Bool = false) -> ProfileSaveResult {
+        let profiles = apiProfiles
+        if let index = profiles.firstIndex(where: { $0.id == profile.id }),
+           !LLMProviderSupport.sameEndpointHost(profiles[index].baseURL, profile.baseURL) {
+            // 新端点使用独立账号，防止写入阶段失败或退出时把新旧密钥发送到对方的端点。
+            let replacement = APIProfile(apiProtocol: profile.apiProtocol, baseURL: profile.baseURL, model: profile.model)
+            guard prepareAPIKey(key, for: replacement, sessionOnly: sessionOnly) else { return .keyNotSaved }
+            guard clearAPIKey(for: profiles[index]) else {
+                _ = clearAPIKey(for: replacement)
+                return .oldKeyNotCleared
+            }
+            var updated = profiles
+            updated[index] = replacement
+            apiProfiles = updated
+            if activeProfileID == profile.id { activeProfileID = replacement.id }
+            return .saved(replacement)
         }
+        guard prepareAPIKey(key, for: profile, sessionOnly: sessionOnly) else { return .keyNotSaved }
         upsertProfile(profile)
-        return true
+        if !key.isEmpty, !sessionOnly { clearSupersededLegacyKey(for: profile) }
+        return .saved(profile)
+    }
+
+    private func prepareAPIKey(_ key: String, for profile: APIProfile, sessionOnly: Bool) -> Bool {
+        guard !key.isEmpty else { return true }
+        if sessionOnly {
+            sessionKeyLock.withLock { sessionKeys[profile.id] = key }
+            return true
+        }
+        return persistAPIKey(key, for: profile)
     }
 
     /// 删除配置并清理其钥匙串密钥；激活项被删时切到剩余第一项（无剩余则回到系统词典兜底）
-    func deleteProfile(id: UUID) {
-        apiProfiles = apiProfiles.filter { $0.id != id }
-        secrets.delete(account: Self.keychainAccount(for: id))
-        // 遗留存储若归属该配置，必须一并清除：否则这份密钥会变成无主值，
-        // 被下一个生效配置继承（正是「A 的密钥串到 B」的路径之一）
-        if legacyKeyApplies(to: id) {
-            clearLegacyKeyStorage()
+    @discardableResult
+    func deleteProfile(id: UUID) -> Bool {
+        guard let profile = apiProfiles.first(where: { $0.id == id }), clearAPIKey(for: profile) else {
+            return false
         }
+        apiProfiles = apiProfiles.filter { $0.id != id }
         if activeProfileID == id {
             activeProfileID = apiProfiles.first?.id
         }
+        return true
     }
 
     /// 按生效 profile 生成钥匙串 account（"profile-<uuid>"），实现密钥按配置隔离
@@ -175,27 +201,27 @@ final class AppConfig {
 
     /// 遗留全局存储（默认钥匙串 account / UserDefaults 明文）是否属于该配置。
     /// 无 owner 的历史数据一律不认（迁移会在启动或建首个配置时补上 owner），
-    /// 这样「钥匙串不可用 → 回退明文 → 切换生效配置」不会把 A 的密钥交给 B。
+    /// 切换生效配置时不会把 A 的遗留密钥交给 B。
     private func legacyKeyApplies(to profileID: UUID?) -> Bool {
         guard let profileID, let owner = legacyKeyOwnerID else { return false }
         return owner == profileID
     }
 
-    /// 读取遗留全局密钥（调用方须先用 legacyKeyApplies 校验归属）
-    private func loadLegacyKeyValue() -> String? {
-        if let key = secrets.load(account: Self.legacyKeychainAccount), !key.isEmpty { return key }
-        let plaintext = defaults.string(forKey: Key.apiKey) ?? ""
-        return plaintext.isEmpty ? nil : plaintext
+    private func assignLegacyKeyOwnerIfNeeded(to profileID: UUID) {
+        guard legacyKeyOwnerID == nil else { return }
+        if defaults.string(forKey: Key.apiKey)?.isEmpty == false ||
+            secrets.read(account: Self.legacyKeychainAccount, allowInteraction: false) != .missing {
+            legacyKeyOwnerID = profileID
+        }
     }
 
     /// 清空遗留全局存储（明文 + 默认钥匙串 account + 归属记录）
     @discardableResult
     private func clearLegacyKeyStorage() -> Bool {
+        guard secrets.delete(account: Self.legacyKeychainAccount) else { return false }
         defaults.removeObject(forKey: Key.apiKey)
-        let keychainCleared = secrets.delete(account: Self.legacyKeychainAccount)
-        // 钥匙串删不掉时保留归属记录：遗留值仍在，但只能被原归属配置读到
-        if keychainCleared { legacyKeyOwnerID = nil }
-        return keychainCleared
+        legacyKeyOwnerID = nil
+        return true
     }
 
     /// 指定配置实际生效的密钥：环境变量 → 该配置自己的钥匙串 → 仅当遗留存储归属它时才回退。
@@ -205,35 +231,58 @@ final class AppConfig {
             return ProcessInfo.processInfo.environment["CLICKTOKNOW_API_KEY"] ?? ""
         }
         guard let profile else { return "" }
-        if let key = secrets.load(account: Self.keychainAccount(for: profile.id)),
-           !key.isEmpty { return key }
-        guard legacyKeyApplies(to: profile.id) else { return "" }
-        return loadLegacyKeyValue() ?? ""
+        return storedCredential(for: profile).key
     }
 
     /// 指定配置的已存密钥掩码。legacy 链（默认 account / UserDefaults 明文）只对
     /// 归属该配置时回显，否则会出现「B 显示着 A 的掩码」的误导。
-    func storedKeyMask(for profile: APIProfile) -> (masked: String, legacy: Bool)? {
-        if let key = secrets.load(account: Self.keychainAccount(for: profile.id)), !key.isEmpty {
-            return (Self.mask(key), false)
+    func storedKeyMask(for profile: APIProfile) -> String? {
+        let key = storedCredential(for: profile).key
+        return key.isEmpty ? nil : Self.mask(key)
+    }
+
+    func storedKeySource(for profile: APIProfile) -> APIKeySource {
+        storedCredential(for: profile).source
+    }
+
+    func canMigrateLegacyAPIKey(for profile: APIProfile) -> Bool {
+        guard legacyKeyApplies(to: profile.id),
+              secrets.read(account: Self.keychainAccount(for: profile.id), allowInteraction: false) == .missing else {
+            return false
         }
-        guard legacyKeyApplies(to: profile.id) else { return nil }
-        if let key = secrets.load(account: Self.legacyKeychainAccount), !key.isEmpty {
-            return (Self.mask(key), false)
+        let source = storedKeySource(for: profile)
+        return source == .legacyUserDefaults || source == .keychain
+    }
+
+    private func storedCredential(for profile: APIProfile) -> (key: String, source: APIKeySource) {
+        if let key = sessionKeyLock.withLock({ sessionKeys[profile.id] }) { return (key, .session) }
+        let account = Self.keychainAccount(for: profile.id)
+        switch secrets.read(account: account, allowInteraction: false) {
+        case .value(let key): return (key, .keychain)
+        case .inaccessible: return ("", .keychainNeedsAuthorization)
+        case .missing: break
         }
-        if let key = defaults.string(forKey: Key.apiKey), !key.isEmpty { return (Self.mask(key), true) }
-        return nil
+        guard legacyKeyApplies(to: profile.id) else { return ("", .none) }
+        switch secrets.read(account: Self.legacyKeychainAccount, allowInteraction: false) {
+        case .value(let key): return (key, .keychain)
+        case .inaccessible: return ("", .keychainNeedsAuthorization)
+        case .missing:
+            if let key = defaults.string(forKey: Key.apiKey), !key.isEmpty {
+                return (key, .legacyUserDefaults)
+            }
+            return ("", .none)
+        }
     }
 
     /// 清除指定配置的密钥（含归属它的遗留存储）。返回是否确认清除成功。
     @discardableResult
     func clearAPIKey(for profile: APIProfile) -> Bool {
-        var succeeded = secrets.delete(account: Self.keychainAccount(for: profile.id))
-        if legacyKeyApplies(to: profile.id) {
-            succeeded = clearLegacyKeyStorage() && succeeded
-        }
-        notifyLLMConfigChanged()
-        return succeeded
+        defer { notifyLLMConfigChanged() }
+        // 先清旧来源，避免删掉当前条目后旧值重新生效。
+        if legacyKeyApplies(to: profile.id), !clearLegacyKeyStorage() { return false }
+        guard secrets.delete(account: Self.keychainAccount(for: profile.id)) else { return false }
+        _ = sessionKeyLock.withLock { sessionKeys.removeValue(forKey: profile.id) }
+        return true
     }
 
     // MARK: - 生效配置的只读视图（ProviderFactory / 状态页 / 测试器共用）
@@ -255,13 +304,7 @@ final class AppConfig {
     var apiKeySource: APIKeySource {
         if apiKeyFromEnvironment { return .environment }
         guard let profile = activeProfile else { return .none }
-        if let key = secrets.load(account: Self.keychainAccount(for: profile.id)), !key.isEmpty {
-            return .keychain
-        }
-        guard legacyKeyApplies(to: profile.id) else { return .none }
-        if let key = secrets.load(account: Self.legacyKeychainAccount), !key.isEmpty { return .keychain }
-        if let legacy = defaults.string(forKey: Key.apiKey), !legacy.isEmpty { return .legacyUserDefaults }
-        return .none
+        return storedKeySource(for: profile)
     }
 
     /// LLM 是否可用：Base URL 与 Model 必填；密钥非空即可用，
@@ -313,10 +356,7 @@ final class AppConfig {
         return "\(key.prefix(4))••••\(key.suffix(4))"
     }
 
-    /// 为生效配置写入或清除密钥：优先钥匙串，失败回退 UserDefaults（裸可执行 ad-hoc 签名场景保底）。
-    /// 传空串 = 清除该配置的密钥存储（环境变量来源的密钥不受影响，仍生效）。
-    /// 返回值：true = 钥匙串操作成功（或非空密钥已安全落钥匙串）；false = 回退/删除失败，
-    /// 调用方应据此如实提示，避免「已清除」但旧密钥仍在钥匙串里复活。
+    /// 为生效配置保存或清除密钥。
     @discardableResult
     func setAPIKey(_ value: String) -> Bool {
         guard let profile = activeProfile else {
@@ -325,39 +365,56 @@ final class AppConfig {
                 Log.config.warning("尚无生效 API 配置，密钥未保存")
                 return false
             }
-            clearLegacyKeyStorage()
-            return true
+            return clearLegacyKeyStorage()
         }
         return setAPIKey(value, for: profile)
     }
 
-    /// 为指定配置写入密钥（编辑非生效配置时用，避免误写到当前生效项）。
-    /// 钥匙串写入失败时回退到的本地明文会记录归属该配置，因此非生效配置也能安全回退；
-    /// 但仍返回 false，由 UI 如实提示「已回退本地存储」。
+    /// 保存失败时由用户决定是否仅在本次运行中使用。
     @discardableResult
     func setAPIKey(_ value: String, for profile: APIProfile) -> Bool {
         guard !value.isEmpty else { return clearAPIKey(for: profile) }
-        if secrets.save(value, account: Self.keychainAccount(for: profile.id)) {
-            // 新密钥已落该配置自己的条目：归属它的遗留值（若有）视为被取代，清掉避免旧值复活
-            if legacyKeyApplies(to: profile.id) { clearLegacyKeyStorage() }
-            notifyLLMConfigChanged()
-            return true
-        }
-        // 钥匙串不可用：回退到带归属的本地明文。归属记录是本函数安全性的全部前提——
-        // 没有它，这份明文会被下一个生效配置读走。
-        defaults.set(value, forKey: Key.apiKey)
-        legacyKeyOwnerID = profile.id
-        Log.config.warning("钥匙串写入失败，密钥已回退本地存储并绑定归属配置 \(profile.id.uuidString.prefix(8))")
+        guard persistAPIKey(value, for: profile) else { return false }
+        clearSupersededLegacyKey(for: profile)
         notifyLLMConfigChanged()
-        return false
+        return true
     }
 
-    /// 一次性迁移（幂等），启动时调用：
-    /// 1. 单配置时代的端点三件套（baseURL/model/apiProtocol）→ 首个 APIProfile 并置为生效，
-    ///    旧默认 account 的钥匙串密钥随迁到 profile account；
-    /// 2. 遗留密钥（默认钥匙串 account / UserDefaults 明文）→ 归属配置自己的钥匙串条目。
-    /// 归属规则是这里的关键：遗留存储只能归给「迁移时确定的那个配置」，否则切换生效配置后
-    /// 会跟着串到新配置上。迁移失败保持原状并保留归属记录，下次启动重试。
+    private func persistAPIKey(_ value: String, for profile: APIProfile) -> Bool {
+        guard secrets.save(value, account: Self.keychainAccount(for: profile.id)) else { return false }
+        _ = sessionKeyLock.withLock { sessionKeys.removeValue(forKey: profile.id) }
+        return true
+    }
+
+    private func clearSupersededLegacyKey(for profile: APIProfile) {
+        if legacyKeyApplies(to: profile.id) {
+            defaults.removeObject(forKey: Key.apiKey)
+            clearLegacyKeyStorage()
+        }
+    }
+
+    /// 用户主动授权时重试读取，并在可行时迁移归属该配置的旧密钥。
+    @discardableResult
+    func authorizeAPIKey(for profile: APIProfile) -> Bool {
+        defer { notifyLLMConfigChanged() }
+        let account = Self.keychainAccount(for: profile.id)
+        switch secrets.read(account: account, allowInteraction: true) {
+        case .value: return true
+        case .inaccessible: return false
+        case .missing: break
+        }
+        guard legacyKeyApplies(to: profile.id) else { return false }
+        let key: String
+        switch secrets.read(account: Self.legacyKeychainAccount, allowInteraction: true) {
+        case .value(let value): key = value
+        case .inaccessible: return false
+        case .missing: key = defaults.string(forKey: Key.apiKey) ?? ""
+        }
+        guard !key.isEmpty else { return false }
+        return setAPIKey(key, for: profile)
+    }
+
+    /// 启动时迁移旧端点并确定密钥归属。钥匙串写入延后至用户操作。
     func migrateLegacyConfigIfNeeded() {
         if apiProfiles.isEmpty {
             let legacyURL = (defaults.string(forKey: Key.baseURL) ?? "")
@@ -379,45 +436,7 @@ final class AppConfig {
             defaults.removeObject(forKey: Key.model)
             defaults.removeObject(forKey: Key.apiProtocol)
         }
-        migrateLegacyKeyIfNeeded()
-    }
-
-    /// 遗留密钥迁移 + 归属确定：
-    /// - 已记录归属：只迁给归属配置；归属配置已被删除则丢弃遗留值（不跟随新的生效项）。
-    /// - 未记录归属（升级自无 owner 的旧版本）：归给当前生效配置，仅此一次。
-    /// - 没有生效配置：保留原状，等建出第一个配置时再归属（见 upsertProfile）。
-    private func migrateLegacyKeyIfNeeded() {
-        guard let legacyValue = loadLegacyKeyValue() else { return }
-
-        if let owner = legacyKeyOwnerID {
-            guard apiProfiles.contains(where: { $0.id == owner }) else {
-                clearLegacyKeyStorage()
-                Log.config.warning("遗留密钥的归属配置已不存在，已丢弃遗留密钥")
-                return
-            }
-            adoptLegacyKey(legacyValue, into: owner)
-            return
-        }
-
-        guard let owner = activeProfile?.id else { return }
-        legacyKeyOwnerID = owner
-        adoptLegacyKey(legacyValue, into: owner)
-    }
-
-    /// 把遗留值写进 owner 自己的钥匙串条目，成功后清空遗留存储
-    private func adoptLegacyKey(_ value: String, into owner: UUID) {
-        let account = Self.keychainAccount(for: owner)
-        if let existing = secrets.load(account: account), !existing.isEmpty {
-            // 该配置已有自己的密钥：遗留值作废（配置自身条目优先级更高）
-            clearLegacyKeyStorage()
-            Log.config.info("配置 \(owner.uuidString.prefix(8)) 已有密钥，已清理归属它的遗留存储")
-            return
-        }
-        if secrets.save(value, account: account) {
-            clearLegacyKeyStorage()
-            Log.config.info("已将遗留密钥迁移至配置 \(owner.uuidString.prefix(8)) 的钥匙串条目")
-        }
-        // 保存失败：保留遗留存储与归属记录，下次启动重试（归属已绑定，不会串给别的配置）
+        if let profile = activeProfile { assignLegacyKeyOwnerIfNeeded(to: profile.id) }
     }
 
     // MARK: - 应用黑名单

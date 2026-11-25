@@ -116,7 +116,9 @@ struct LLMSettingsTabView: View {
             }
             Spacer(minLength: 8)
             if let activeProfile, statusModel.llmStatus != .ready {
-                Button("补全配置") { editorTarget = EditorTarget(profile: activeProfile) }
+                Button(statusModel.keySource == .keychainNeedsAuthorization ? "去授权" : "补全配置") {
+                    editorTarget = EditorTarget(profile: activeProfile)
+                }
             } else if activeProfile == nil {
                 Button("添加配置") { editorTarget = EditorTarget(profile: nil) }
             }
@@ -143,7 +145,8 @@ struct LLMSettingsTabView: View {
     private var cardTitle: String {
         switch statusModel.llmStatus {
         case .ready: return "大模型已就绪"
-        case .missingKey: return "已配置，但还缺 API Key"
+        case .missingKey:
+            return statusModel.keySource == .keychainNeedsAuthorization ? "API Key 需要授权" : "已配置，但还缺 API Key"
         case .notConfigured:
             return activeProfile == nil ? "尚未添加 API 配置" : "当前配置不完整"
         }
@@ -154,6 +157,9 @@ struct LLMSettingsTabView: View {
         case .ready:
             return "当前使用「\(statusModel.activeModel)」· \(statusModel.activeBaseURL)"
         case .missingKey:
+            if statusModel.keySource == .keychainNeedsAuthorization {
+                return "「\(statusModel.activeModel)」暂用系统词典。授权访问钥匙串后可继续用大模型。"
+            }
             return "「\(statusModel.activeModel)」已保存为当前使用，填入密钥后立即生效；否则划词仍走系统词典。"
         case .notConfigured:
             return activeProfile == nil
@@ -175,53 +181,70 @@ struct LLMSettingsTabView: View {
             }
             .buttonStyle(.plain)
             .help(isActive(profile) ? "当前使用中" : "设为当前使用")
-            .padding(.top, 2)
+            .padding(.top, 3)
 
-            Button {
-                editorTarget = EditorTarget(profile: profile)
-            } label: {
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(profile.model.isEmpty ? "（未设模型）" : profile.model)
-                            .font(.callout)
-                            .fontWeight(.medium)
-                            .lineLimit(1)
-                        Text(profile.apiProtocol.displayName)
+            // 整行包进 Button 时，Form 的行高估算会偏向控件行高：三行文本被压扁、内容溢出到相邻行，
+            // 表现为模型名被徽标压住、状态行压住分隔线、右侧箭头/删除图标被裁。这里改成普通内容 +
+            // 点击手势，让行高完全由内容决定，再用 fixedSize(vertical:) 兜底，避免被外层压回一行高。
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(profile.model.isEmpty ? "（未设模型）" : profile.model)
+                        .font(.callout)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        // 空间不够时先压模型名（截断成 …），保证徽标/钥匙图标完整可见
+                        .layoutPriority(-1)
+                        .help(profile.model)
+                    Text(profile.apiProtocol.displayName)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(.quaternary, in: Capsule())
+                        .fixedSize()
+                    if hasStoredKey(profile) {
+                        Image(systemName: "key.fill")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(.quaternary, in: Capsule())
-                        if hasStoredKey(profile) {
-                            Image(systemName: "key.fill")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .help("已配置密钥")
-                        }
-                    }
-                    Text(profile.baseURL)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(rowStatusColor(profile))
-                            .frame(width: 6, height: 6)
-                        Text(rowStatusText(profile))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .fixedSize()
+                            .help("已配置密钥")
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+                Text(profile.baseURL)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(profile.baseURL)
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(rowStatusColor(profile))
+                        .frame(width: 6, height: 6)
+                    Text(rowStatusText(profile))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
-            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            // 箭头与文字同属一个点击区域：整块（含箭头）都能打开编辑，不再是「看着能点、点了没反应」
+            .contentShape(Rectangle())
+            .onTapGesture { openEditor(for: profile) }
             .help("编辑该配置")
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityHint("编辑该配置")
+            .accessibilityAction { openEditor(for: profile) }
 
             Image(systemName: "chevron.right")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+                .padding(.top, 2)
+                .contentShape(Rectangle())
+                .onTapGesture { openEditor(for: profile) }
+                .accessibilityHidden(true)
 
             Button(role: .destructive) {
                 pendingDeletion = profile
@@ -232,7 +255,13 @@ struct LLMSettingsTabView: View {
             .buttonStyle(.plain)
             .help("删除该配置（连同其密钥）")
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 打开编辑弹窗（列表行点击与无障碍默认动作共用）
+    private func openEditor(for profile: APIProfile) {
+        editorTarget = EditorTarget(profile: profile)
     }
 
     /// 该配置是否当前启用
@@ -258,7 +287,11 @@ struct LLMSettingsTabView: View {
         let prefix = isActive(profile) ? "使用中" : "未启用"
         switch AppConfig.shared.llmStatus(for: profile) {
         case .ready: return "\(prefix) · 可用"
-        case .missingKey: return "\(prefix) · 缺少密钥，划词回落系统词典"
+        case .missingKey:
+            if AppConfig.shared.storedKeySource(for: profile) == .keychainNeedsAuthorization {
+                return "\(prefix) · 需要授权访问密钥"
+            }
+            return "\(prefix) · 缺少密钥，划词回落系统词典"
         case .notConfigured: return "\(prefix) · 配置不完整"
         }
     }
@@ -281,8 +314,8 @@ struct LLMSettingsTabView: View {
         var text = result.activated
             ? "已保存并启用「\(result.model)」"
             : "已保存「\(result.model)」（当前使用未变）"
-        if result.keychainFallback {
-            text += "；钥匙串不可用，密钥已回退本地存储（按配置隔离）"
+        if result.sessionOnly {
+            text += "。API Key 仅在本次运行中有效。"
         }
         notice = text
         statusModel.refresh()
@@ -301,7 +334,10 @@ struct LLMSettingsTabView: View {
     private func removeProfile(_ profile: APIProfile) {
         let config = AppConfig.shared
         let wasActive = isActive(profile)
-        config.deleteProfile(id: profile.id)
+        guard config.deleteProfile(id: profile.id) else {
+            notice = "无法确认密钥已删除。请授权访问钥匙串后重试。"
+            return
+        }
         reload()
         if wasActive {
             if let next = config.activeProfile {

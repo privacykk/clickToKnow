@@ -34,6 +34,9 @@ enum TestHelpers {
         var isAvailable: Bool
         /// 写入是否失败；仅 save 受影响，delete 仍按 isAvailable 走
         var failSaves: Bool
+        var lockedAccounts: Set<String> = []
+        var grantInteraction = true
+        private(set) var interactiveReads: [String] = []
         /// 记录所有写入调用，便于断言「B 的密钥没有被写进 A 的条目」
         private(set) var savedAccounts: [String] = []
         /// 记录所有删除调用
@@ -45,9 +48,14 @@ enum TestHelpers {
             self.failSaves = failSaves
         }
 
-        func load(account: String) -> String? {
-            guard isAvailable else { return nil }
-            return storage[account]
+        func read(account: String, allowInteraction: Bool) -> SecretRead {
+            if allowInteraction { interactiveReads.append(account) }
+            guard isAvailable else { return .inaccessible }
+            if lockedAccounts.contains(account) {
+                guard allowInteraction && grantInteraction else { return .inaccessible }
+                lockedAccounts.remove(account)
+            }
+            return storage[account].map(SecretRead.value) ?? .missing
         }
 
         @discardableResult

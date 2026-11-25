@@ -8,7 +8,7 @@ macOS 全局划词释义工具：选中文字 → 按快捷键 → 就地弹出*
 |---|---|---|
 | 开发运行 | `swift run` | 见下文「运行」 |
 | 单元测试 | `swift test` | 见下文「测试」 |
-| 打包分发 | `./Scripts/package.sh` | `dist/ClickToKnow.app` + `dist/ClickToKnow-<版本>.dmg` / `.zip`，详见下文「打包与分发」 |
+| 打包分发 | `./Scripts/package.sh` | `dist/ClickToKnow-<版本>.dmg` 和 `dist/ClickToKnow-<版本>.zip`，详见下文「打包与分发」 |
 | 固定签名身份（一次性） | `./Scripts/make_signing_cert.sh` | 生成「ClickToKnow Local Signing」证书，覆盖安装不再丢辅助功能授权 |
 | 卸载清理 | `./Scripts/uninstall.sh`（`--dry-run` 预演 / `--purge` 连生词本与 `.env` 一起删） | 移除 .app、配置 plist、全部配置的钥匙串密钥；默认保留生词本，详见下文「卸载」 |
 
@@ -19,8 +19,8 @@ macOS 全局划词释义工具：选中文字 → 按快捷键 → 就地弹出*
 - **授权失效能识别并一键修复**：覆盖安装换掉签名后，系统设置里条目仍在却失效（显示未授权），状态页/菜单栏点「修复授权」重建授权记录，不必手动移除条目再重新添加
 - 无 AI Key 时用 macOS 系统词典兜底（`DCSCopyTextDefinition`）；Ollama 等**免密钥本地服务**填好 Base URL 与 Model 即可直接使用
 - 配 Key 后调用 LLM 做领域感知释义，支持四种 API 协议：OpenAI Chat Completions（通义千问 / DeepSeek / 月之暗面 / Ollama …）、OpenAI Responses、Anthropic Messages、Gemini API；可保存**多套 API 配置**并一键切换，内置供应商预设、**模型目录拉取**与**连接测试**
-- API Key 优先存**钥匙串**（不可用时自动回退本地存储并在状态页标注）
-- NSPanel 悬浮窗就地展示：不抢焦点、跟随系统亮暗外观、点击外部 / 超时 / `Esc` 关闭，关闭时自动取消在途请求；鼠标悬停期间暂停倒计时（长释义不会读到一半被关掉）
+- API Key 保存到**钥匙串**。写入失败时可选择仅本次运行使用，退出后失效。
+- NSPanel 悬浮窗就地展示：不抢焦点、跟随系统亮暗外观、点击外部 / 超时 / `Esc` 关闭，关闭时自动取消在途请求；鼠标悬停期间暂停倒计时（长释义不会读到一半被关掉）；顶部握把或卡片空白处可**拖动移位**，拖动后流式内容只向下增长、不再被拉回选区
 - **取词失败可见反馈**：未授权 / 安全输入态（密码框）/ 黑名单应用 / 空选择 / 超时分别给出可操作提示，不再静默无反应
 - **结果操作**：弹窗可复制释义、朗读词条、钉住、收藏和重试。启用历史时可在历史页筛选收藏
 - **释义模板**：技术文档、通用阅读和中英翻译适用于四种大模型协议
@@ -56,12 +56,11 @@ swift test
 
 ## 打包与分发
 
-一条命令生成可直接安装的 `.app` 与 **DMG / zip 双格式分发件**（输出到 `dist/`）：
+一条命令将 **DMG / zip 双格式分发件**输出到 `dist/`。打包所用的 `.app` 在临时目录中组装并于脚本退出时清理。
 
 ```bash
-./Scripts/package.sh          # → dist/ClickToKnow.app
-                              #   dist/ClickToKnow-0.2.1.dmg（拖入 Applications 安装布局）
-                              #   dist/ClickToKnow-0.2.1.zip
+./Scripts/package.sh          # → dist/ClickToKnow-<版本>.dmg（拖入 Applications 安装布局）
+                              #   dist/ClickToKnow-<版本>.zip
 ```
 
 脚本完成：release 构建（默认 arm64 + x86_64 双架构 lipo 合并，`ARCHS=arm64` 可只出单架构）→ bundle 组装（`Info.plist`、程序化生成的图标）→ 代码签名 → `ditto` 压缩 zip → `hdiutil` 生成 DMG（内含 Applications 快捷方式，打开即可拖拽安装）。`VERSION` / `BUNDLE_ID` / `SIGN_IDENTITY` / `NOTARIZE` / `ARCHS` 等均可用环境变量覆盖（见脚本头部注释）。
@@ -92,9 +91,9 @@ swift test
 ### 用户安装说明（ad-hoc 签名版）
 
 1. 打开 `ClickToKnow-0.2.1.dmg`，把 `ClickToKnow.app` 拖入「Applications」（zip 版则解压后拖入）
-2. 首次打开会提示「无法验证开发者」：**系统设置 → 隐私与安全性 → 点「仍要打开」**（旧版 macOS 可右键 App → 打开；或终端 `xattr -dr com.apple.quarantine /Applications/ClickToKnow.app`）
-3. 首次划词按引导到 **系统设置 → 隐私与安全 → 辅助功能** 勾选 ClickToKnow（`.app` 签名后授权稳定，只需一次）
-4. 升级替换 `.app`：用 Developer ID 或本机固定身份签名时授权自动保持；ad-hoc 重新签名则需重新授权——状态总览会把它识别为「授权已失效」，点「修复授权」即可，无需手动移除再添加
+2. **打开应用**。从项目的 GitHub Release 下载并确认来源后，若 macOS 提示无法验证开发者，到「系统设置 → 隐私与安全性」点「仍要打开」。
+3. **全局划词**。按应用引导到「系统设置 → 隐私与安全性 → 辅助功能」启用 ClickToKnow。覆盖安装后如显示授权失效，可在「状态总览」点「修复授权」。
+4. **大模型密钥**。升级后 macOS 可能要求重新授权。若看到「需要授权访问钥匙串」，到「大模型」编辑对应配置，点「授权访问密钥」。授权前仍可使用系统词典。
 
 ### 卸载
 
@@ -170,7 +169,7 @@ cp .env.example .env
 
 #### 设置窗口填写
 
-保存的密钥写入钥匙串（service=`ClickToKnow`）；钥匙串不可用时（裸可执行 ad-hoc 签名重编译后可能被拒）自动回退 UserDefaults，状态页会标注「来自本地存储（已回退）」。UI 与日志中密钥一律以掩码展示（如 `sk-a••••3456`）。
+API Key 保存在钥匙串（service=`ClickToKnow`），每套配置使用独立条目。应用启动和刷新状态时静默检查。需要授权时，可以在 API 配置编辑页点「授权访问密钥」或「测试连接」。如果钥匙串写入失败，可选择「仅本次运行使用」。旧版保存在本地的密钥可通过「迁移旧密钥到钥匙串」迁移，成功后清除旧明文。状态页使用掩码展示可读密钥（如 `sk-a••••3456`）。
 
 ### Base URL / Model
 
@@ -199,7 +198,7 @@ Tests/ClickToKnowTests/         纯逻辑单测 + URLProtocol mock 集成测试�
 
 ## 已知限制
 
-- 开发模式（`swift run`）下**辅助功能权限按进程路径记录，裸可执行文件授权难以持久**，钥匙串读取也可能因 ad-hoc 签名变化反复询问；打包成 `.app` 并执行一次 `./Scripts/make_signing_cert.sh` 后这两点均解决（固定证书签名，覆盖安装不再失效）。
+- 开发模式（`swift run`）重新编译后可能需要重新授予辅助功能权限和钥匙串访问权限。本机打包可用 `./Scripts/make_signing_cert.sh` 生成固定签名身份，减少升级时的重复授权。
 - 系统设置里「条目还在却显示未授权」是 ad-hoc 签名换版后的典型症状：状态总览会标为「授权已失效」并提供「修复授权」（重置 TCC 条目 + 重新弹授权），无需再手动移除条目后重新添加。
 - 默认打包产物为 universal binary（arm64 + x86_64）；只需单架构可 `ARCHS=arm64 ./Scripts/package.sh`（构建更快、产物更小）。
 - 弹窗是 `nonactivating` 面板，不抢焦点，因此 `Esc` 关闭依赖**全局**监视器；macOS 不允许全局监视器消费事件，所以按下 `Esc` 时原应用也会收到这次按键（例如在全屏视频里 Esc 会同时退出全屏）。不使用「全局事件拦截（CGEventTap）」是刻意的：那会吞掉其他应用的 `Esc`，属于明显的系统级行为回归。

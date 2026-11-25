@@ -17,10 +17,7 @@ struct LLMProfileSaveResult {
     let model: String
     /// 是否同时设为当前使用
     let activated: Bool
-    /// 密钥未能写入钥匙串，已回退本地存储。
-    /// 回退值带配置归属（见 AppConfig.setAPIKey），因此不再需要区分生效/非生效配置，
-    /// 只需如实告知用户「没进钥匙串」。
-    let keychainFallback: Bool
+    let sessionOnly: Bool
 }
 
 /// 单个 API 配置的编辑弹窗：新增与编辑共用，保存后由父视图刷新列表。
@@ -41,6 +38,7 @@ struct LLMProfileEditorSheet: View {
     @State private var baseURL: String
     @State private var model: String
     @State private var apiKeyInput = ""
+    @State private var keychainSaveFailed = false
 
     /// 连接测试状态
     @State private var testState: LLMTestState = .idle
@@ -129,7 +127,16 @@ struct LLMProfileEditorSheet: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        if existingKeyMask != nil && statusModel.keySource != .environment {
+                        if let existing, statusModel.keySource != .environment {
+                            if needsKeyAuthorization {
+                                Button("授权访问密钥") { authorizeKey(for: existing) }
+                                    .controlSize(.small)
+                            } else if AppConfig.shared.canMigrateLegacyAPIKey(for: existing) {
+                                Button("迁移旧密钥到钥匙串") { authorizeKey(for: existing) }
+                                    .controlSize(.small)
+                            }
+                        }
+                        if (existingKeyMask != nil || needsKeyAuthorization) && statusModel.keySource != .environment {
                             Button("清除已存密钥") { clearKey() }
                                 .controlSize(.small)
                         }
@@ -239,6 +246,14 @@ struct LLMProfileEditorSheet: View {
                     .foregroundStyle(noticeIsError ? Color.red : Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if keychainSaveFailed, !LLMProviderSupport.sanitizedAPIKey(apiKeyInput).isEmpty {
+                HStack {
+                    if existing != nil {
+                        Button("仅本次运行使用") { commit(activate: false, sessionOnly: true) }
+                    }
+                    Button("仅本次运行使用并启用") { commit(activate: true, sessionOnly: true) }
+                }
+            }
             if missingKeyWarning {
                 Label("该供应商需要 API Key：现在保存，划词仍会回落系统词典。", systemImage: "exclamationmark.triangle.fill")
                     .font(.footnote)
@@ -338,9 +353,18 @@ struct LLMProfileEditorSheet: View {
     }
 
     /// 已存密钥掩码（nil = 该配置没有密钥）
-    private var existingKeyMask: (masked: String, legacy: Bool)? {
+    private var existingKeyMask: String? {
         guard let existing else { return nil }
         return AppConfig.shared.storedKeyMask(for: existing)
+    }
+
+    private var existingKeySource: AppConfig.APIKeySource {
+        guard let existing else { return .none }
+        return AppConfig.shared.storedKeySource(for: existing)
+    }
+
+    private var needsKeyAuthorization: Bool {
+        existingKeySource == .keychainNeedsAuthorization
     }
 
     /// 密钥来源提示：掩码回显 + 来源说明；密钥永不以明文出现在 UI
@@ -351,10 +375,15 @@ struct LLMProfileEditorSheet: View {
         if storedKeyBlockedByHostChange {
             return "端点主机已变更：已存密钥不会自动用于新地址，请重新输入密钥后测试/拉取"
         }
+        if needsKeyAuthorization {
+            return "需要授权访问钥匙串。授权后可继续使用已保存的密钥。"
+        }
         if let stored = existingKeyMask {
-            return stored.legacy
-                ? "已保存：\(stored.masked)（本地存储，钥匙串不可用已回退）；建议重新输入保存一次"
-                : "已保存：\(stored.masked)（钥匙串）；留空保存表示保持不变"
+            switch existingKeySource {
+            case .legacyUserDefaults: return "\(stored) · 旧版明文存储，可迁移到钥匙串"
+            case .session: return "\(stored) · 仅本次运行使用，退出后失效"
+            default: return "\(stored) · 已保存到钥匙串，留空保持不变"
+            }
         }
         return "尚未保存密钥；若该供应商必须鉴权，划词会回落 macOS 系统词典"
     }
@@ -363,6 +392,7 @@ struct LLMProfileEditorSheet: View {
     private var missingKeyWarning: Bool {
         guard LLMProviderSupport.sanitizedAPIKey(apiKeyInput).isEmpty,
               existingKeyMask == nil,
+              !needsKeyAuthorization,
               statusModel.keySource != .environment,
               !baseURL.trimmingCharacters(in: .whitespaces).isEmpty,
               !model.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
@@ -387,6 +417,7 @@ struct LLMProfileEditorSheet: View {
 
     /// 端点三要素（协议/URL/密钥）变动后：测试结果、拉取的模型目录与在途拉取一并作废
     private func invalidateEndpointDerivations() {
+        keychainSaveFailed = false
         resetTestState()
         // 在途的拉取结果已无意义：换代并解除 loading，旧任务回来时会被代际校验丢弃
         fetchGeneration += 1
@@ -413,13 +444,30 @@ struct LLMProfileEditorSheet: View {
 
     /// 端点主机已改动且存在可沿用的已存密钥：测试/拉取不会带上该密钥，需要提示用户重新确认
     private var storedKeyBlockedByHostChange: Bool {
-        guard let existing, existingKeyMask != nil else { return false }
+        guard let existing, existingKeyMask != nil || needsKeyAuthorization else { return false }
         guard LLMProviderSupport.sanitizedAPIKey(apiKeyInput).isEmpty else { return false }
         return !LLMProviderSupport.sameEndpointHost(existing.baseURL, baseURL)
     }
 
+    private func authorizeKey(for profile: APIProfile) {
+        let authorized = AppConfig.shared.authorizeAPIKey(for: profile)
+        statusModel.refresh()
+        notice = authorized ? "钥匙串密钥可用" : "钥匙串密钥暂不可用，请确认已授权或解锁钥匙串后重试。"
+        noticeIsError = !authorized
+    }
+
+    /// 测试和拉取是显式操作，且只为同一端点读取它自己的密钥。
+    private func prepareFormKey() -> Bool {
+        guard let existing, !AppConfig.shared.apiKeyFromEnvironment, needsKeyAuthorization,
+              LLMProviderSupport.sanitizedAPIKey(apiKeyInput).isEmpty,
+              LLMProviderSupport.sameEndpointHost(existing.baseURL, baseURL) else { return true }
+        authorizeKey(for: existing)
+        return !needsKeyAuthorization
+    }
+
     /// 用表单当前值测试（而非已保存值），保存前即可发现问题
     private func runTest() {
+        guard prepareFormKey() else { return }
         testGeneration += 1
         let generation = testGeneration
         testState = .testing
@@ -446,6 +494,7 @@ struct LLMProfileEditorSheet: View {
     /// 拉取模型目录：成功后当前模型不在目录里则自动套用第一个。
     /// 与连接测试一样走代际校验：端点 A 的慢响应不得覆盖已切到端点 B 的列表与模型选择
     private func fetchModels() {
+        guard prepareFormKey() else { return }
         fetchGeneration += 1
         let generation = fetchGeneration
         // 输入快照：请求参数与「回来时该不该采用」都以发起时刻为准
@@ -485,8 +534,8 @@ struct LLMProfileEditorSheet: View {
         testState = .idle
     }
 
-    /// 校验并落库：upsert 配置 +（可选）设为启用；非空密钥写入钥匙串（内部自动回退）
-    private func commit(activate: Bool) {
+    /// 校验并保存配置，只有用户主动选择时才仅在内存中使用新密钥。
+    private func commit(activate: Bool, sessionOnly: Bool = false) {
         notice = nil
         noticeIsError = false
         let trimmedURL = baseURL.trimmingCharacters(in: .whitespaces)
@@ -510,24 +559,29 @@ struct LLMProfileEditorSheet: View {
             baseURL: trimmedURL,
             model: trimmedModel
         )
-        guard config.saveEditedProfile(profile) else {
+        let keyInput = LLMProviderSupport.sanitizedAPIKey(apiKeyInput)
+        let savedProfile: APIProfile
+        switch config.saveEditedProfile(profile, key: keyInput, sessionOnly: sessionOnly) {
+        case .oldKeyNotCleared:
             notice = "无法确认旧端点的密钥已清除。请先清除密钥，再保存新的 Base URL。"
             noticeIsError = true
             return
+        case .keyNotSaved:
+            notice = "钥匙串写入失败。可以授权后重试，或仅在本次运行中使用该密钥。"
+            noticeIsError = true
+            keychainSaveFailed = true
+            return
+        case .saved(let saved):
+            savedProfile = saved
         }
         if activate {
-            config.activeProfileID = profile.id
+            config.activeProfileID = savedProfile.id
         }
-
-        // 同一端点留空时沿用已存密钥，新端点只使用显式输入的密钥。
-        let keyInput = LLMProviderSupport.sanitizedAPIKey(apiKeyInput)
-        // 回退到的本地明文会绑定该配置的归属，非生效配置同样可安全保存，因此只有一个「没进钥匙串」标记
-        let keychainFallback = !keyInput.isEmpty && !config.setAPIKey(keyInput, for: profile)
 
         onSaved(LLMProfileSaveResult(
             model: profile.model,
             activated: activate,
-            keychainFallback: keychainFallback
+            sessionOnly: sessionOnly
         ))
         dismiss()
     }

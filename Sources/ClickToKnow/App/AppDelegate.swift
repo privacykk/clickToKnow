@@ -30,8 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // 先做一次性迁移（单配置 → 配置列表、明文密钥 → 钥匙串）再装配 UI，
-        // 保证状态页首次展示的就是最终密钥来源
+        // 整理旧配置和密钥归属。迁移密钥等到用户在设置页主动操作。
         AppConfig.shared.migrateLegacyConfigIfNeeded()
         statusBarController = StatusBarController(statusModel: statusModel)
         popover = ResultPopover()
@@ -125,6 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleSelectionFailure(_ failure: SelectionFailure, at location: NSPoint) {
         // 新一次取词已失败：让上一次查询失效，否则旧响应返回后会把这条提示覆盖成释义
         invalidateCurrentQuery()
+        popover?.resetPlacement() // 提示贴新选区，不继承上一次拖动后的位置
         let message: String
         switch failure {
         case .noAccessibilityPermission:
@@ -196,6 +196,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 流式增量与最终结果都校验会话代际，过期响应一律丢弃。
     private func handleSelectedText(_ text: String, at location: NSPoint, context: String?, bypassCache: Bool = false) {
         invalidateCurrentQuery() // 新查询取代旧查询：旧请求立即断连而非仅丢弃结果
+        // 新查询重新贴回选区：同一次查询后续的流式收尾/失败提示走 show 时会保留用户拖动的位置
+        popover?.resetPlacement()
         let requestID = querySession.begin()
 
         // 查询开始时冻结配置：缓存键、Provider、历史归属都取自这一份快照，

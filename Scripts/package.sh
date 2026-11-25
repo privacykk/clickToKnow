@@ -54,7 +54,6 @@ fi
 NOTARIZE="${NOTARIZE:-0}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-notarytool}"
 DIST="dist"
-APP="$DIST/$APP_NAME.app"
 
 # 打包涉及签名/公证工具，优先使用完整 Xcode 工具链；
 # 本机 CommandLineTools 存在 SDK 版本错配问题时也能正常工作
@@ -102,7 +101,10 @@ fi
 [ -f "$BIN" ] || { echo "未找到构建产物 $BIN" >&2; exit 1; }
 
 echo "==> 2/6 组装 .app bundle"
-rm -rf "$APP"
+# .app、DMG 布局和公证上传包都在临时目录中组装，退出时一并清理。
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/clicktoknow-package.XXXXXXXX")"
+trap 'rm -rf "$WORK_DIR"' EXIT
+APP="$WORK_DIR/$APP_NAME.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
 sed -e "s/__APP_NAME__/$APP_NAME/g" \
@@ -134,7 +136,7 @@ codesign --verify --verbose=2 "$APP"
 if [ "$NOTARIZE" = "1" ]; then
     [ "$SIGN_IDENTITY" != "-" ] || { echo "NOTARIZE=1 需要 Developer ID 签名身份" >&2; exit 1; }
     echo "==> 3.5 公证（notarytool profile: $NOTARY_PROFILE）"
-    NOTARY_ZIP="$DIST/notary-upload.zip"
+    NOTARY_ZIP="$WORK_DIR/notary-upload.zip"
     ditto -c -k --keepParent "$APP" "$NOTARY_ZIP"
     xcrun notarytool submit "$NOTARY_ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
     rm -f "$NOTARY_ZIP"
@@ -151,8 +153,8 @@ ditto -c -k --keepParent "$APP" "$ZIP"
 
 echo "==> 5/6 生成 DMG（拖入 Applications 安装布局）"
 DMG="$DIST/$APP_NAME-$VERSION.dmg"
-STAGING="$DIST/dmg-staging"
-rm -rf "$STAGING" "$DMG"
+STAGING="$WORK_DIR/dmg-staging"
+rm -f "$DMG"
 mkdir -p "$STAGING"
 ditto "$APP" "$STAGING/$APP_NAME.app"
 ln -s /Applications "$STAGING/Applications"   # 打开 dmg 即见「App → Applications」拖拽布局
@@ -171,18 +173,14 @@ if [ "$NOTARIZE" = "1" ]; then
 fi
 
 echo "==> 6/6 完成"
-echo "    应用：$APP"
 echo "    分发件：$DMG"
 echo "            $ZIP"
 if [ "$SIGN_IDENTITY" = "-" ]; then
     cat <<'EOF'
     ⚠️ 使用 ad-hoc 签名：
-      1) 未经过公证，用户首次打开会被 Gatekeeper 拦截：
-         系统设置 → 隐私与安全性 → 「仍要打开」（旧系统可右键 App → 打开），
-         或终端执行：xattr -dr com.apple.quarantine /Applications/ClickToKnow.app
-      2) 辅助功能授权按二进制 cdhash 记录，每次覆盖安装都会失效
-         （系统设置里条目还在，却显示未授权）。一次性修复：
-         ./Scripts/make_signing_cert.sh 生成固定签名身份后重新打包。
+      1) 若 macOS 提示无法验证开发者，确认下载来源后，到「系统设置 → 隐私与安全性」点「仍要打开」。
+      2) 覆盖安装后如显示辅助功能授权失效，在「状态总览」点「修复授权」。
+      3) 大模型密钥可能需要重新授权。在「大模型」编辑对应配置并点「授权访问密钥」。
 EOF
 elif [ "$SIGN_IDENTITY" = "$LOCAL_SIGN_IDENTITY" ]; then
     cat <<EOF

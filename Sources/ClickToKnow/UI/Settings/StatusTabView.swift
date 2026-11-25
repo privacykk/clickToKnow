@@ -54,7 +54,9 @@ struct StatusTabView: View {
                         if statusModel.localDictionaryOnly {
                             Button("隐私设置") { selection = .privacy }
                         } else if statusModel.llmStatus != .ready {
-                            Button(statusModel.profileCount == 0 ? "去配置" : "去补全") { selection = .llm }
+                            Button(statusModel.keySource == .keychainNeedsAuthorization ? "去授权" : "去配置") {
+                                selection = .llm
+                            }
                         }
                     }
                 }
@@ -165,7 +167,7 @@ struct StatusTabView: View {
         case .notConfigured:
             return ("去配置大模型", .tab(.llm))
         case .missingKey:
-            return ("去填写密钥", .tab(.llm))
+            return (statusModel.keySource == .keychainNeedsAuthorization ? "去授权" : "去填写密钥", .tab(.llm))
         case .ready:
             if statusModel.hotKeyPaused {
                 return nil
@@ -202,7 +204,7 @@ struct StatusTabView: View {
         case .notConfigured:
             return statusModel.profileCount == 0 ? "尚未配置大模型" : "当前配置不完整"
         case .missingKey:
-            return "大模型已保存，但还缺 API Key"
+            return statusModel.keySource == .keychainNeedsAuthorization ? "API Key 需要授权" : "大模型已保存，但还缺 API Key"
         case .ready:
             if statusModel.hotKeyPaused { return "取词已暂停" }
             if !statusModel.hotKeyRegistered { return "快捷键未注册" }
@@ -228,6 +230,9 @@ struct StatusTabView: View {
                 ? "现在由 macOS 系统词典兜底；添加一个 API 配置即可使用大模型释义。"
                 : "已保存的配置缺少端点或模型，请补全后再保存。"
         case .missingKey:
+            if statusModel.keySource == .keychainNeedsAuthorization {
+                return "当前使用系统词典。可在「大模型」页授权访问钥匙串中的密钥。"
+            }
             return "「\(statusModel.activeModel)」划词时仍会回落系统词典，填入密钥后立即生效。"
         case .ready:
             if statusModel.hotKeyPaused {
@@ -313,7 +318,8 @@ struct StatusTabView: View {
         if statusModel.localDictionaryOnly { return "系统词典（仅本地）" }
         switch statusModel.llmStatus {
         case .ready: return statusModel.activeModel
-        case .missingKey: return "缺少密钥（回落系统词典）"
+        case .missingKey:
+            return statusModel.keySource == .keychainNeedsAuthorization ? "需要授权（回落系统词典）" : "缺少密钥（回落系统词典）"
         case .notConfigured: return "系统词典（未配置 LLM）"
         }
     }
@@ -340,15 +346,17 @@ struct StatusTabView: View {
 
     /// 掩码密钥 + 生效来源（环境来源合并展示「环境变量 / .env」，二者运行时不可分辨）
     private var keyText: String {
+        if statusModel.keySource == .keychainNeedsAuthorization { return "需要授权访问钥匙串" }
         guard let masked = statusModel.maskedKey else {
             if statusModel.profileCount == 0 { return "未配置" }
             return requiresKey ? "未配置（该供应商必需）" : "未配置（该供应商可留空）"
         }
         switch statusModel.keySource {
         case .environment: return "\(masked) · 来自环境变量 / .env"
+        case .session: return "\(masked) · 仅本次运行使用"
         case .keychain: return "\(masked) · 来自钥匙串"
-        case .legacyUserDefaults: return "\(masked) · 来自本地存储（钥匙串不可用，已回退）"
-        case .none: return masked
+        case .legacyUserDefaults: return "\(masked) · 旧版明文存储，可迁移到钥匙串"
+        case .none, .keychainNeedsAuthorization: return masked
         }
     }
 }

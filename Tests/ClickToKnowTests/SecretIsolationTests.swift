@@ -40,38 +40,55 @@ final class SecretIsolationTests: XCTestCase {
         let original = config.upsertProfile(makeProfile())
         XCTAssertTrue(config.setAPIKey("test-old-key", for: original))
         let sameHost = makeProfile(id: original.id, baseURL: "https://api.deepseek.com/v1")
-        XCTAssertTrue(config.saveEditedProfile(sameHost))
+        XCTAssertEqual(config.saveEditedProfile(sameHost), .saved(sameHost))
         XCTAssertNotNil(config.storedKeyMask(for: sameHost))
         let differentHost = makeProfile(id: original.id, baseURL: "https://different.example/v1")
-        XCTAssertTrue(config.saveEditedProfile(differentHost))
+        guard case .saved(let replacement) = config.saveEditedProfile(differentHost) else {
+            return XCTFail("未保存新端点")
+        }
+        XCTAssertNotEqual(replacement.id, original.id)
         XCTAssertEqual(config.activeProfile?.baseURL, differentHost.baseURL)
-        XCTAssertNil(config.storedKeyMask(for: differentHost))
+        XCTAssertNil(config.storedKeyMask(for: replacement))
     }
 
-    // MARK: - 问题 2：回退的明文/遗留密钥必须绑定归属配置
+    func test_failedKeyReplacementLeavesOldEndpointAndKeyUsable() {
+        let config = makeConfig()
+        let original = config.upsertProfile(makeProfile())
+        XCTAssertTrue(config.setAPIKey("old-key", for: original))
+        let edited = makeProfile(id: original.id, baseURL: "https://different.example/v1")
+        secrets.failSaves = true
+        XCTAssertEqual(config.saveEditedProfile(edited, key: "new-key"), .keyNotSaved)
+        XCTAssertEqual(config.activeProfile, original)
+        XCTAssertEqual(config.apiKey, "old-key")
+        guard case .saved(let replacement) = config.saveEditedProfile(edited, key: "new-key", sessionOnly: true) else {
+            return XCTFail("未保存会话密钥")
+        }
+        XCTAssertNotEqual(replacement.id, original.id)
+        XCTAssertEqual(config.activeProfile, replacement)
+        XCTAssertEqual(config.apiKey, "new-key")
+        XCTAssertEqual(makeConfig().apiKey, "")
+    }
 
-    /// 核心回归：A 保存失败（钥匙串不可用，回退明文）→ 切到 B，B 不得读到 A 的密钥。
-    /// 之前明文是无主单值，切换生效配置后新配置直接继承，等于把 A 的密钥发给 B 的端点。
-    func test_plaintextFallbackDoesNotLeakToOtherProfileAfterSwitch() {
+    func test_failedSaveRequiresExplicitSessionChoiceAndDoesNotPersistKey() {
         let profileA = makeProfile(baseURL: "https://api.deepseek.com")
         let profileB = makeProfile(baseURL: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k")
         let config = makeConfig()
         config.upsertProfile(profileA)
         config.upsertProfile(profileB)
 
-        // A 为生效配置且钥匙串写入失败 → 回退本地明文
         config.activeProfileID = profileA.id
         secrets.failSaves = true
-        let savedToKeychain = config.setAPIKey("sk-aaaa-secret-a", for: profileA)
-        XCTAssertFalse(savedToKeychain, "钥匙串写入失败应如实返回 false")
-        XCTAssertEqual(defaults.string(forKey: "apiKey"), "sk-aaaa-secret-a", "非空密钥应回退到本地明文")
+        XCTAssertEqual(config.saveEditedProfile(profileA, key: "sk-aaaa-secret-a"), .keyNotSaved)
+        XCTAssertNil(defaults.string(forKey: "apiKey"))
+        XCTAssertEqual(config.apiKeySource, .none)
 
-        // A 自己仍能读到（回退值属于它）
+        XCTAssertEqual(config.saveEditedProfile(profileA, key: "sk-aaaa-secret-a", sessionOnly: true), .saved(profileA))
+        XCTAssertEqual(config.apiKeySource, .session)
         XCTAssertEqual(config.effectiveAPIKey(for: profileA), "sk-aaaa-secret-a")
 
         // 切到 B：B 不得继承这份明文
         config.activeProfileID = profileB.id
-        XCTAssertEqual(config.effectiveAPIKey(for: profileB), "", "B 不得借用 A 回退的明文密钥")
+        XCTAssertEqual(config.effectiveAPIKey(for: profileB), "", "B 不得借用 A 的会话密钥")
         XCTAssertEqual(config.apiKey, "", "生效配置 B 的 apiKey 必须为空")
         XCTAssertEqual(config.apiKeySource, .none)
         XCTAssertNil(config.storedKeyMask(for: profileB), "B 不应回显 A 的密钥掩码")
@@ -79,7 +96,34 @@ final class SecretIsolationTests: XCTestCase {
         // A 再切回来仍可用
         config.activeProfileID = profileA.id
         XCTAssertEqual(config.effectiveAPIKey(for: profileA), "sk-aaaa-secret-a")
-        XCTAssertEqual(config.apiKeySource, .legacyUserDefaults)
+        XCTAssertEqual(config.apiKeySource, .session)
+        XCTAssertEqual(makeConfig().apiKeySource, .none)
+        XCTAssertNil(defaults.string(forKey: "apiKey"))
+    }
+
+    func test_lockedKeyDoesNotPromptUntilExplicitAuthorizationAndCanRetry() {
+        let config = makeConfig()
+        let profile = config.upsertProfile(makeProfile())
+        let account = AppConfig.keychainAccount(for: profile.id)
+        secrets.storage[account] = "test-locked-key"
+        secrets.lockedAccounts = [account]
+        config.migrateLegacyConfigIfNeeded()
+
+        XCTAssertEqual(config.apiKeySource, .keychainNeedsAuthorization)
+        XCTAssertEqual(config.llmStatus, .missingKey)
+        XCTAssertNil(config.storedKeyMask(for: profile))
+        XCTAssertFalse(ProviderFactory.snapshot(from: config).usesLLM)
+        XCTAssertTrue(secrets.interactiveReads.isEmpty)
+        XCTAssertTrue(secrets.savedAccounts.isEmpty)
+
+        secrets.grantInteraction = false
+        XCTAssertFalse(config.authorizeAPIKey(for: profile))
+        XCTAssertEqual(config.apiKeySource, .keychainNeedsAuthorization)
+        secrets.grantInteraction = true
+        XCTAssertTrue(config.authorizeAPIKey(for: profile))
+        XCTAssertEqual(config.apiKeySource, .keychain)
+        XCTAssertTrue(ProviderFactory.snapshot(from: config).usesLLM)
+        XCTAssertEqual(secrets.interactiveReads, [account, account])
     }
 
     /// 重启迁移不得把遗留明文迁到「新的生效配置」名下：
@@ -88,12 +132,11 @@ final class SecretIsolationTests: XCTestCase {
         let profileA = makeProfile()
         let profileB = makeProfile(baseURL: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k")
 
-        // 第一次启动：A 生效，保存失败 → 明文绑定 A
+        // 模拟旧版本写入的明文及其归属。
         let first = makeConfig()
         first.upsertProfile(profileA)
         first.activeProfileID = profileA.id
-        secrets.failSaves = true
-        first.setAPIKey("sk-aaaa-secret-a", for: profileA)
+        seedLegacyPlaintext(for: profileA)
 
         // 用户切到 B 后重启（钥匙串仍然不可用）
         first.upsertProfile(profileB)
@@ -116,14 +159,16 @@ final class SecretIsolationTests: XCTestCase {
         first.upsertProfile(profileA)
         first.upsertProfile(profileB)
         first.activeProfileID = profileA.id
-        secrets.failSaves = true
-        first.setAPIKey("sk-aaaa-secret-a", for: profileA)
+        seedLegacyPlaintext(for: profileA)
 
-        // 切到 B 并重启，此时钥匙串可用
+        // 重启只整理归属，用户主动操作后才迁移密钥。
         first.activeProfileID = profileB.id
         secrets.failSaves = false
         let second = makeConfig()
         second.migrateLegacyConfigIfNeeded()
+        XCTAssertTrue(secrets.savedAccounts.isEmpty)
+        XCTAssertTrue(secrets.interactiveReads.isEmpty)
+        XCTAssertTrue(second.authorizeAPIKey(for: profileA))
 
         XCTAssertEqual(secrets.storage[AppConfig.keychainAccount(for: profileA.id)], "sk-aaaa-secret-a",
                        "遗留密钥应迁入归属配置 A 的条目")
@@ -140,8 +185,7 @@ final class SecretIsolationTests: XCTestCase {
         let config = makeConfig()
         config.upsertProfile(profileA)
         config.activeProfileID = profileA.id
-        secrets.failSaves = true
-        config.setAPIKey("sk-aaaa-secret-a", for: profileA)
+        seedLegacyPlaintext(for: profileA)
         XCTAssertEqual(defaults.string(forKey: "apiKey"), "sk-aaaa-secret-a")
 
         config.deleteProfile(id: profileA.id)
@@ -157,8 +201,7 @@ final class SecretIsolationTests: XCTestCase {
         let config = makeConfig()
         config.upsertProfile(profile)
         config.activeProfileID = profile.id
-        secrets.failSaves = true
-        config.setAPIKey("sk-aaaa-secret-a", for: profile)
+        seedLegacyPlaintext(for: profile)
 
         XCTAssertTrue(config.clearAPIKey(for: profile))
         XCTAssertNil(defaults.string(forKey: "apiKey"))
@@ -192,13 +235,20 @@ final class SecretIsolationTests: XCTestCase {
 
         let profileA = makeProfile()
         config.upsertProfile(profileA)
-        // upsert 时收编 → 迁入 A 自己的条目
+        // upsert 只绑定归属。授权后迁入 A 自己的条目。
         XCTAssertEqual(config.effectiveAPIKey(for: profileA), "sk-legacy-keychain")
+        XCTAssertNotNil(secrets.storage["apiKey"])
+        XCTAssertTrue(config.authorizeAPIKey(for: profileA))
         XCTAssertNil(secrets.storage["apiKey"], "迁移后遗留 account 应清除")
 
         let profileB = makeProfile(baseURL: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k")
         config.upsertProfile(profileB)
         XCTAssertEqual(config.effectiveAPIKey(for: profileB), "")
+    }
+
+    private func seedLegacyPlaintext(for profile: APIProfile) {
+        defaults.set("sk-aaaa-secret-a", forKey: "apiKey")
+        defaults.set(profile.id.uuidString, forKey: "legacyAPIKeyOwnerProfileID")
     }
 
     // MARK: - 问题 1：新增配置不得借用任何已存密钥
