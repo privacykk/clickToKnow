@@ -37,6 +37,8 @@ final class AutoCloseScheduler {
     private let timer: AutoCloseTimer
     /// 鼠标当前是否停在弹窗上
     private(set) var isHovering = false
+    private(set) var isPinned = false
+    private var isActive = false
     private(set) var duration: TimeInterval
 
     /// 倒计时到点回调（ResultPopover 据此关闭面板）
@@ -51,6 +53,7 @@ final class AutoCloseScheduler {
     /// 开始/重排倒计时（首次展示与内容更新时调用；悬停中不排）
     func restart(duration: TimeInterval) {
         self.duration = duration
+        isActive = true
         arm()
     }
 
@@ -61,15 +64,24 @@ final class AutoCloseScheduler {
         if hovering { timer.cancel() } else { arm() }
     }
 
+    func setPinned(_ pinned: Bool) {
+        guard pinned != isPinned else { return }
+        isPinned = pinned
+        arm()
+    }
+
     /// 关闭弹窗时清理计时
     func invalidate() {
+        isActive = false
+        isHovering = false
+        isPinned = false
         timer.cancel()
     }
 
     /// 排定倒计时；悬停期间一律不排——「悬停暂停」的全部实现就在这里
     private func arm() {
         timer.cancel()
-        guard !isHovering else { return }
+        guard isActive, !isHovering, !isPinned else { return }
         timer.schedule(after: duration) { [weak self] in
             self?.onFire?()
         }

@@ -84,11 +84,11 @@ final class InterpretationCacheTests: XCTestCase {
         XCTAssertEqual(makeKey(context: nil), makeKey(context: "   \n "))
     }
 
-    /// 上下文摘要按空白归一 + 转小写，且截断到固定长度（避免键无限增长）
-    func test_contextDigest_isNormalizedAndBounded() {
-        XCTAssertEqual(InterpretationCache.contextDigest("  Foo\n\tBar  "), "foo bar")
-        let long = String(repeating: "a", count: 400)
-        XCTAssertEqual(InterpretationCache.contextDigest(long).count, InterpretationCache.contextDigestLimit)
+    func test_contextDigest_includesTheEntireContextAndPreservesCase() {
+        let prefix = String(repeating: "a", count: 200)
+        XCTAssertNotEqual(makeKey(context: prefix + " Kubernetes"), makeKey(context: prefix + " sailing"))
+        XCTAssertNotEqual(makeKey(context: "US"), makeKey(context: "us"))
+        XCTAssertEqual(InterpretationCache.contextDigest(prefix).count, 44)
     }
 
     /// 词典结果与 LLM 结果必须分键：同一端点缺密钥时入缓存的是词典，补上密钥后不得再命中

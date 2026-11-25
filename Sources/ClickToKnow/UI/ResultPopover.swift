@@ -1,9 +1,11 @@
 import AppKit
+import AVFoundation
+import NaturalLanguage
 
 /// 就地悬浮展示释义的无边框面板：不抢焦点、浮于其它窗口之上、点击外部/超时自动关闭，
 /// 鼠标悬停期间暂停倒计时（避免长内容读到一半被打断）。
 @MainActor
-final class ResultPopover {
+final class ResultPopover: NSObject {
     /// 无边框不抢焦点的浮动面板
     private let panel: NSPanel
     /// 圆角容器（同时承担悬停检测）
@@ -11,6 +13,17 @@ final class ResultPopover {
     private let scrollView: NSScrollView
     /// 释义内容承载（Markdown 渲染结果直接设置）
     private let textView: NSTextView
+    private let toolbar = NSStackView()
+    private let copyButton = NSButton(title: "复制释义", target: nil, action: nil)
+    private let speakButton = NSButton(title: "发音", target: nil, action: nil)
+    private let pinButton = NSButton(title: "钉住", target: nil, action: nil)
+    private let favoriteButton = NSButton(title: "收藏", target: nil, action: nil)
+    private let retryButton = NSButton(title: "重试", target: nil, action: nil)
+    private let closeButton = NSButton(title: "关闭", target: nil, action: nil)
+    private let speech = AVSpeechSynthesizer()
+    private var result: Interpretation?
+    private var retry: (() -> Void)?
+    private var toggleFavorite: (() -> Bool?)?
     /// 点击外部关闭的全局监视器
     private var dismissMonitor: Any?
     /// Esc 关闭的本地监视器（事件投递给本进程时生效）
@@ -31,7 +44,7 @@ final class ResultPopover {
     private static let padding: CGFloat = 16
 
     /// 组装面板、滚动视图、文本视图与悬停容器
-    init() {
+    override init() {
         panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: Self.maxWidth, height: 200),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -66,6 +79,7 @@ final class ResultPopover {
         scrollView.documentView = textView
 
         container = HoverDetectingView()
+        super.init()
         container.wantsLayer = true
         container.layer?.cornerRadius = 12
         container.layer?.borderWidth = 0.5
@@ -74,6 +88,8 @@ final class ResultPopover {
             self?.hoverChanged(hovering)
         }
         container.addSubview(scrollView)
+        configureToolbar()
+        container.addSubview(toolbar)
         panel.contentView = container
         autoClose.onFire = { [weak self] in
             self?.close()
@@ -88,13 +104,30 @@ final class ResultPopover {
 
     /// 首次展示（或切换到一条新内容）：定尺寸定位 → 装监视器 → 排倒计时 → 上屏。
     /// 流式增量请走 `updateContent`，否则每帧重装监视器与重排倒计时会把悬停暂停覆盖掉。
-    func show(_ attributed: NSAttributedString, at mouse: NSPoint, autoCloseAfter: TimeInterval = 15) {
+    func show(
+        _ attributed: NSAttributedString, at mouse: NSPoint, autoCloseAfter: TimeInterval = 15,
+        result: Interpretation? = nil, retry: (() -> Void)? = nil, toggleFavorite: (() -> Bool?)? = nil
+    ) {
+        self.result = result
+        self.retry = retry
+        self.toggleFavorite = toggleFavorite
+        copyButton.title = "复制释义"
+        copyButton.isHidden = result == nil
+        speakButton.isHidden = result == nil
+        pinButton.isHidden = result == nil
+        retryButton.isHidden = retry == nil
+        favoriteButton.isHidden = toggleFavorite == nil
+        favoriteButton.title = "收藏"
+        speech.stopSpeaking(at: .immediate)
+        autoClose.setPinned(false)
+        pinButton.title = "钉住"
         lastAnchor = mouse
         layout(attributed, at: mouse)
         addDismissMonitor()
         addKeyMonitor()
         autoClose.restart(duration: autoCloseAfter)
         panel.orderFront(nil)
+        autoClose.hoverChanged(panel.frame.contains(NSEvent.mouseLocation))
     }
 
     /// 仅更新内容：沿用首次展示的锚点重排尺寸，不碰监视器、不重排倒计时。
@@ -124,10 +157,13 @@ final class ResultPopover {
         textView.frame = NSRect(x: 0, y: 0, width: textWidth, height: fullTextHeight)
 
         // scrollView 占据可视区域
-        scrollView.frame = NSRect(x: pad, y: pad, width: textWidth, height: visibleHeight)
+        let toolbarHeight: CGFloat = 24
+        let toolbarSpacing: CGFloat = 8
+        toolbar.frame = NSRect(x: pad, y: pad, width: textWidth, height: toolbarHeight)
+        scrollView.frame = NSRect(x: pad, y: pad + toolbarHeight + toolbarSpacing, width: textWidth, height: visibleHeight)
 
         let width = textWidth + pad * 2
-        let height = visibleHeight + pad * 2
+        let height = visibleHeight + pad * 2 + toolbarHeight + toolbarSpacing
 
         // 定位到鼠标附近并 clamp 进屏幕
         let visible = Self.screen(for: mouse)?.visibleFrame
@@ -147,8 +183,68 @@ final class ResultPopover {
         removeDismissMonitor()
         removeKeyMonitor()
         autoClose.invalidate()
+        result = nil
+        retry = nil
+        toggleFavorite = nil
+        speech.stopSpeaking(at: .immediate)
         panel.orderOut(nil)
         onClose?()
+    }
+
+    private func configureToolbar() {
+        toolbar.orientation = .horizontal
+        toolbar.spacing = 8
+        toolbar.detachesHiddenViews = true
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let actions: [(NSButton, Selector)] = [
+            (copyButton, #selector(copyResult)), (speakButton, #selector(speakTerm)),
+            (pinButton, #selector(togglePin)), (favoriteButton, #selector(favoriteResult)),
+            (retryButton, #selector(retryQuery)),
+            (closeButton, #selector(closeFromButton))
+        ]
+        for (button, action) in actions {
+            if button === closeButton { toolbar.addArrangedSubview(spacer) }
+            button.target = self
+            button.action = action
+            button.controlSize = .small
+            button.bezelStyle = .rounded
+            button.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+            toolbar.addArrangedSubview(button)
+        }
+    }
+
+    @objc private func copyResult() {
+        guard let result else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        if pasteboard.setString(result.content, forType: .string) { copyButton.title = "已复制" }
+    }
+
+    @objc private func speakTerm() {
+        guard let result else { return }
+        speech.stopSpeaking(at: .immediate)
+        let utterance = AVSpeechUtterance(string: result.term)
+        if let language = NLLanguageRecognizer.dominantLanguage(for: result.term) {
+            utterance.voice = AVSpeechSynthesisVoice(language: language.rawValue)
+        }
+        speech.speak(utterance)
+    }
+
+    @objc private func togglePin() {
+        autoClose.setPinned(!autoClose.isPinned)
+        pinButton.title = autoClose.isPinned ? "取消钉住" : "钉住"
+    }
+
+    @objc private func retryQuery() { retry?() }
+    @objc private func closeFromButton() { close() }
+
+    @objc private func favoriteResult() {
+        guard let favorite = toggleFavorite?() else {
+            favoriteButton.isHidden = true
+            return
+        }
+        favoriteButton.title = favorite ? "取消收藏" : "收藏"
     }
 
     /// Esc 关闭。两条路径缺一不可：
@@ -197,7 +293,7 @@ final class ResultPopover {
         dismissMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown]
         ) { [weak self] _ in
-            guard let self else { return }
+            guard let self, !self.autoClose.isPinned else { return }
             let loc = NSEvent.mouseLocation
             let hit = NSWindow.windowNumber(at: loc, belowWindowWithWindowNumber: 0)
             if hit != self.panel.windowNumber {

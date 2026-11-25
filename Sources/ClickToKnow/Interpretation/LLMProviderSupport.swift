@@ -49,6 +49,11 @@ enum LLMProviderSupport {
         return "\(scheme)://\(host)\(port)"
     }
 
+    static func sameEndpointHost(_ firstURL: String, _ secondURL: String) -> Bool {
+        let firstHost = endpointHost(firstURL)
+        return !firstHost.isEmpty && firstHost == endpointHost(secondURL)
+    }
+
     /// 非 2xx 时给出**可展示的错误摘要**：只保留状态码与白名单字段，不透传原始正文。
     ///
     /// 正文直接进 UI / 日志是明确的泄漏面：第三方代理常在错误体里回显请求内容、

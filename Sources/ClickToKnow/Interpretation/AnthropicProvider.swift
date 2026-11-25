@@ -3,7 +3,7 @@ import Foundation
 /// Anthropic 原生 Messages API（POST /v1/messages）客户端。
 /// 与 OpenAI 兼容协议的差异：x-api-key + anthropic-version 头鉴权（非 Bearer），
 /// system 是顶层字段（非 messages 数组元素），max_tokens 必填，响应取 content[].text。
-final class AnthropicProvider: InterpretationProvider, LLMPinging {
+final class AnthropicProvider: StreamingInterpretationProvider, LLMPinging {
     typealias Config = LLMEndpointConfig
 
     /// API 版本头：锁 2023-06-01 这一稳定版本，避免服务端默认版本漂移改变行为
@@ -18,14 +18,8 @@ final class AnthropicProvider: InterpretationProvider, LLMPinging {
         self.session = session
     }
 
-    /// 非流式整包（Anthropic SSE 事件结构不同，暂未做流式；等待感由其通常较快的响应兜底）
     func interpret(_ text: String, context: String?) async throws -> Interpretation {
-        var body = pingBody(maxTokens: 512)
-        body["system"] = LLMProviderSupport.systemPrompt
-        body["messages"] = [["role": "user", "content": LLMProviderSupport.userPrompt(term: text, context: context)]]
-        body["temperature"] = 0.2
-
-        let data = try await send(body: body, timeout: nil)
+        let data = try await send(body: queryBody(text, context: context, stream: false), timeout: nil)
 
         let decoded: MessagesResponse
         do {
@@ -41,6 +35,33 @@ final class AnthropicProvider: InterpretationProvider, LLMPinging {
             content: LLMProviderSupport.stripCodeFence(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
             source: .llm
         )
+    }
+
+    func interpretStreaming(
+        _ text: String, context: String?, onDelta: @escaping @MainActor (String) -> Void
+    ) async throws -> Interpretation {
+        let request = try makeRequest(body: queryBody(text, context: context, stream: true), timeout: nil)
+        return try await EventStream.interpret(term: text, request: request, session: session, decode: { data in
+            let event = try EventStream.decodeJSON(StreamEvent.self, from: data)
+            switch event.type {
+            case "content_block_start" where event.content_block?.type == "text":
+                return .append(event.content_block?.text ?? "")
+            case "content_block_delta" where event.delta?.type == "text_delta":
+                return .append(event.delta?.text ?? "")
+            case "message_stop": return .done()
+            case "error": throw InterpretationError.badResponse
+            default: return .skip
+            }
+        }, onDelta: onDelta)
+    }
+
+    private func queryBody(_ text: String, context: String?, stream: Bool) -> [String: Any] {
+        var body = pingBody(maxTokens: 512)
+        body["system"] = config.explanationStyle.prompt
+        body["messages"] = [["role": "user", "content": config.explanationStyle.userPrompt(term: text, context: context)]]
+        body["temperature"] = 0.2
+        if stream { body["stream"] = true }
+        return body
     }
 
     /// 最小连通探测：max_tokens=1 的一次对话，验证 baseURL/密钥/模型名三件套。
@@ -60,7 +81,7 @@ final class AnthropicProvider: InterpretationProvider, LLMPinging {
     }
 
     /// 发送请求并做过错归类；timeout 传 nil 用 session 默认（20s），ping 显式压到 15s
-    private func send(body: [String: Any], timeout: TimeInterval?) async throws -> Data {
+    private func makeRequest(body: [String: Any], timeout: TimeInterval?) throws -> URLRequest {
         guard let url = messagesURL else {
             throw InterpretationError.badConfiguration
         }
@@ -71,7 +92,11 @@ final class AnthropicProvider: InterpretationProvider, LLMPinging {
         request.setValue(config.apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue(Self.anthropicVersion, forHTTPHeaderField: "anthropic-version")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return request
+    }
 
+    private func send(body: [String: Any], timeout: TimeInterval?) async throws -> Data {
+        let request = try makeRequest(body: body, timeout: timeout)
         let data: Data
         let response: URLResponse
         do {
@@ -89,6 +114,17 @@ final class AnthropicProvider: InterpretationProvider, LLMPinging {
             throw LLMProviderSupport.serverError(status: http.statusCode, data: data)
         }
         return data
+    }
+
+    private struct StreamEvent: Decodable {
+        struct Block: Decodable {
+            let type: String?
+            let text: String?
+        }
+
+        let type: String
+        let delta: Block?
+        let content_block: Block?
     }
 
     /// 端点拼接：剥尾部斜杠后追加 /v1/messages；无 scheme 视为非法配置

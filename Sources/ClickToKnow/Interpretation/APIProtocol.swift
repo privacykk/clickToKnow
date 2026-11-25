@@ -32,13 +32,15 @@ struct LLMEndpointConfig {
     var baseURL: String
     var apiKey: String
     var model: String
+    let explanationStyle: ExplanationStyle
 
     /// apiKey 统一清洗：粘贴混入的换行/空白会让 CFNetwork 静默丢弃 Authorization 头，
     /// 在装配端点时剥掉，划词/测试/ping 各 Provider 无需各自防御
-    init(baseURL: String, apiKey: String, model: String) {
+    init(baseURL: String, apiKey: String, model: String, explanationStyle: ExplanationStyle = .technical) {
         self.baseURL = baseURL
         self.apiKey = LLMProviderSupport.sanitizedAPIKey(apiKey)
         self.model = model
+        self.explanationStyle = explanationStyle
     }
 }
 

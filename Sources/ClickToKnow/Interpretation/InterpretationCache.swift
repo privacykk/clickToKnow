@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// 进程内查询缓存：同一词条（含领域上下文与配置指纹）重复查询直接命中，
 /// 避免反复请求远程 API 带来的延迟与费用。简单 LRU：超出容量淘汰最久未访问条目。
@@ -28,9 +29,6 @@ final class InterpretationCache {
     /// 提示词版本号：`LLMProviderSupport.systemPrompt` 语义变化时递增，令旧缓存整体失效
     static let promptVersion = "1"
 
-    /// 上下文摘要的最大字符数：足够区分领域，又不会让键无限增长
-    static let contextDigestLimit = 160
-
     private let capacity: Int
     private var store: [Key: Interpretation] = [:]
     /// 访问顺序：队尾 = 最近使用，队首 = 最久未用（淘汰候选）
@@ -51,7 +49,8 @@ final class InterpretationCache {
         baseURL: String,
         model: String,
         apiProtocol: APIProtocol,
-        profileID: UUID?
+        profileID: UUID?,
+        explanationStyle: ExplanationStyle = .technical
     ) -> Key {
         Key(
             source: source,
@@ -59,7 +58,7 @@ final class InterpretationCache {
             model: model.trimmingCharacters(in: .whitespacesAndNewlines),
             term: normalizedTerm(term),
             contextDigest: contextDigest(context),
-            promptFingerprint: "\(promptVersion)|\(apiProtocol.rawValue)|\(profileID?.uuidString ?? "none")"
+            promptFingerprint: "\(promptVersion)|\(apiProtocol.rawValue)|\(profileID?.uuidString ?? "none")|\(explanationStyle.rawValue)"
         )
     }
 
@@ -78,17 +77,10 @@ final class InterpretationCache {
             .lowercased()
     }
 
-    /// 上下文摘要：空白归一 + 转小写后截断。
-    /// 不做全文去重压缩——上下文原样参与键，才能保证「同词不同上下文绝不串结果」；
-    /// 代价是同一篇文章里上下文略有差异时不会命中，这是可接受的正确性优先取舍。
+    /// 对完整上下文求摘要，保留大小写和空白，避免词条附近的差异落在截断边界外。
     static func contextDigest(_ context: String?) -> String {
-        guard let context else { return "" }
-        let normalized = context
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-            .lowercased()
-        return String(normalized.prefix(contextDigestLimit))
+        guard let context, !context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
+        return Data(SHA256.hash(data: Data(context.utf8))).base64EncodedString()
     }
 
     /// 命中即刷新访问顺序（维持 LRU 语义）

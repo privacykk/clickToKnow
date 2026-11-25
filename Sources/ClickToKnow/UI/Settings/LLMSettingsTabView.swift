@@ -5,6 +5,8 @@ import SwiftUI
 /// 新增与编辑统一走弹窗（LLMProfileEditorSheet），避免长表单常驻把列表挤到屏幕外。
 @MainActor
 struct LLMSettingsTabView: View {
+    @State private var explanationStyle = AppConfig.shared.explanationStyle
+    @State private var streamsResults = AppConfig.shared.streamsLLMResults
     @EnvironmentObject private var statusModel: AppStatusModel
 
     /// 已配置的 API 列表（保存/删除/切换后从 AppConfig 重新拉取）
@@ -33,6 +35,18 @@ struct LLMSettingsTabView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+
+            Section("释义偏好") {
+                Picker("释义模板", selection: $explanationStyle) {
+                    ForEach(ExplanationStyle.allCases) { style in
+                        Text(style.title).tag(style)
+                    }
+                }
+                .onChange(of: explanationStyle) { AppConfig.shared.explanationStyle = $0 }
+                Toggle("流式显示释义", isOn: $streamsResults)
+                    .onChange(of: streamsResults) { AppConfig.shared.streamsLLMResults = $0 }
+                    .help("如果 API 端点或代理仅支持整包响应，可关闭此项。")
             }
 
             Section("已配置的 API") {

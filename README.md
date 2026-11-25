@@ -15,18 +15,20 @@ macOS 全局划词释义工具：选中文字 → 按快捷键 → 就地弹出*
 ## 功能
 
 - 全局快捷键（默认 `⌥⌘K`，**可自定义**）抓取前台应用选中文本
-- **设置与状态中心**（三 Tab）：辅助功能权限实时状态、快捷键绑定与注册状态、释义来源、API Key 来源与掩码一屏可见
+- **设置与状态中心**：状态总览、大模型、快捷键、隐私四个页签。状态总览可打开 GitHub 最新版本页面
 - **授权失效能识别并一键修复**：覆盖安装换掉签名后，系统设置里条目仍在却失效（显示未授权），状态页/菜单栏点「修复授权」重建授权记录，不必手动移除条目再重新添加
 - 无 AI Key 时用 macOS 系统词典兜底（`DCSCopyTextDefinition`）；Ollama 等**免密钥本地服务**填好 Base URL 与 Model 即可直接使用
 - 配 Key 后调用 LLM 做领域感知释义，支持四种 API 协议：OpenAI Chat Completions（通义千问 / DeepSeek / 月之暗面 / Ollama …）、OpenAI Responses、Anthropic Messages、Gemini API；可保存**多套 API 配置**并一键切换，内置供应商预设、**模型目录拉取**与**连接测试**
 - API Key 优先存**钥匙串**（不可用时自动回退本地存储并在状态页标注）
 - NSPanel 悬浮窗就地展示：不抢焦点、跟随系统亮暗外观、点击外部 / 超时 / `Esc` 关闭，关闭时自动取消在途请求；鼠标悬停期间暂停倒计时（长释义不会读到一半被关掉）
 - **取词失败可见反馈**：未授权 / 安全输入态（密码框）/ 黑名单应用 / 空选择 / 超时分别给出可操作提示，不再静默无反应
+- **结果操作**：弹窗可复制释义、朗读词条、钉住、收藏和重试。启用历史时可在历史页筛选收藏
+- **释义模板**：技术文档、通用阅读和中英翻译适用于四种大模型协议
 - **AX 直读为主路径**：不碰剪贴板、对禁复制应用有效，弹窗贴选区（而非鼠标）展示，选区前后文随查询发送（LLM 领域判断更准）；未实现 AX 的应用自动回退模拟 ⌘C
-- **SSE 流式输出**（OpenAI 兼容协议）：弹窗边收边渲染，增量按 20fps 合并后再排版（长内容不卡主线程），长释义不再有数秒白屏
+- **SSE 流式输出**：四种协议均支持边收边显示。代理仅支持整包响应时，可在「大模型」关闭流式输出
 - **进程内查询缓存**：同一词条（含供应商 + 模型指纹）重复查询零延迟零费用
 - **历史记录（生词本）**：查询自动落盘（上限 500 条），菜单栏「历史记录…」按日分组浏览，支持关键词搜索、来源筛选、单条删除与清空确认，可按当前筛选导出 CSV / Anki TSV
-- **应用黑名单**：密码 / 密钥管理类应用（1Password、钥匙串访问等）内置不抓取，`defaults write ClickToKnow blacklistedBundleIDs -array <bundleID>` 可追加
+- **隐私设置**：查询可切换为仅用系统词典，也可关闭读取及发送选区前后文、停止记录历史或清空历史。可按 Bundle ID 添加禁止取词的应用，内置密码管理应用始终受保护
 - 菜单栏**暂停取词**开关（投屏 / 演示 / 输密码场景）与**开机自启**开关（SMAppService，打包为 .app 后生效）
 - 分级日志（os.Logger，`log show --predicate 'subsystem == "ClickToKnow"'`）与**诊断信息导出**（状态页，脱敏）
 - 选词抓取后自动恢复用户原有剪贴板（⌘C 兜底路径）；安全输入态（密码框聚焦）主动跳过抓取；等待期间前台应用切换则取消本次抓取，不去复制别处的内容
@@ -42,7 +44,7 @@ swift run
 > 先 `export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` 再运行即可
 > （`Scripts/package.sh` 已自动切换）。
 
-启动即打开「设置与状态中心」主窗口（状态总览 / 大模型 / 快捷键三个 Tab），Dock 与菜单栏（放大镜图标）同时存在；关闭窗口后点 Dock 图标或菜单栏「设置…」可重新唤起。启动时若未授权，会引导到「系统设置 → 隐私与安全 → 辅助功能」勾选本程序（模拟 ⌘C 抓词必需）；授权结果在「状态总览」页实时可见。
+启动即打开「设置与状态中心」主窗口，Dock 与菜单栏（放大镜图标）同时存在。关闭窗口后点 Dock 图标或菜单栏「设置…」可重新唤起。启动时若未授权，会引导到「系统设置 → 隐私与安全 → 辅助功能」勾选本程序。授权结果在「状态总览」页实时可见。
 
 ## 测试
 
@@ -186,10 +188,10 @@ Sources/ClickToKnow/
 ├── ClickToKnowApp.swift        入口（regular 激活策略，启动即展示主窗口）
 ├── App/                        AppDelegate / 菜单栏（动态状态 + 暂停/自启/历史入口）/ 设置窗口壳 / 系统设置直达
 ├── Selection/                  全局快捷键（配置化 + 热重注册）+ AX 直读（异步 + messaging timeout）+ ⌘C 抓词事务（兜底，互斥持有到快照恢复完成）+ 键码翻译
-├── Interpretation/             Provider 协议（含流式可选能力）+ 系统词典 + 四种 API 协议实现（OpenAI Chat Completions 含 SSE 流式）+ 模型目录拉取 + 连接测试门面 + 查询缓存
+├── Interpretation/             系统词典 + 四种 API 协议（流式 / 整包）+ 模型目录拉取 + 连接测试 + 查询缓存
 ├── Config/                     UserDefaults 配置（多 API 配置 + 应用黑名单）/ 钥匙串密钥存储（按配置隔离）/ 供应商预设 / 分级日志（os.Logger）
 ├── Status/                     运行时状态聚合（AppStatusModel）+ 辅助功能授权三态与失效识别 + 历史记录持久化（HistoryStore）
-└── UI/                         NSPanel 悬浮窗（自动关闭状态机：悬停冻结）+ Markdown 渲染（弹窗 NSAttributedString / SwiftUI 双实现）+ SwiftUI 设置页（三 Tab）+ 历史记录窗口（搜索 / 筛选 / 导出）
+└── UI/                         NSPanel 结果操作栏 + 共享 Markdown 解析 + SwiftUI 设置页 + 历史记录窗口（搜索 / 收藏 / 筛选 / 导出）
 Packaging/                      Info.plist 模板 + 应用图标（Scripts/make_icon.swift 程序化生成）
 Scripts/                        package.sh 一键打包（默认 universal binary）/ make_signing_cert.sh 本机固定签名身份 / uninstall.sh 卸载清理 / make_icon.swift 图标生成
 Tests/ClickToKnowTests/         纯逻辑单测 + URLProtocol mock 集成测试（含 SSE 流式与历史导出用例）
@@ -200,13 +202,12 @@ Tests/ClickToKnowTests/         纯逻辑单测 + URLProtocol mock 集成测试�
 - 开发模式（`swift run`）下**辅助功能权限按进程路径记录，裸可执行文件授权难以持久**，钥匙串读取也可能因 ad-hoc 签名变化反复询问；打包成 `.app` 并执行一次 `./Scripts/make_signing_cert.sh` 后这两点均解决（固定证书签名，覆盖安装不再失效）。
 - 系统设置里「条目还在却显示未授权」是 ad-hoc 签名换版后的典型症状：状态总览会标为「授权已失效」并提供「修复授权」（重置 TCC 条目 + 重新弹授权），无需再手动移除条目后重新添加。
 - 默认打包产物为 universal binary（arm64 + x86_64）；只需单架构可 `ARCHS=arm64 ./Scripts/package.sh`（构建更快、产物更小）。
-- Anthropic / OpenAI Responses / Gemini 协议暂为非流式整包（OpenAI Chat Completions 协议已支持 SSE 流式）。
 - 弹窗是 `nonactivating` 面板，不抢焦点，因此 `Esc` 关闭依赖**全局**监视器；macOS 不允许全局监视器消费事件，所以按下 `Esc` 时原应用也会收到这次按键（例如在全屏视频里 Esc 会同时退出全屏）。不使用「全局事件拦截（CGEventTap）」是刻意的：那会吞掉其他应用的 `Esc`，属于明显的系统级行为回归。
 
 ## 后续（阶段 3）
 
 - 双击 / 拖选自动触发
-- 提示词模板自定义（内置「技术文档 / 通用阅读」场景预设）
-- Anthropic 协议 SSE 流式、Sparkle 自动更新（需 appcast 托管与签名基础设施）
-- 历史记录收藏标记与复习、菜单栏黑名单 UI 编辑
+- 自定义提示词与输出语言
+- Sparkle 自动更新（需签名与 appcast 托管）
+- 生词标签与复习
 - DMG 自定义背景与图标布局

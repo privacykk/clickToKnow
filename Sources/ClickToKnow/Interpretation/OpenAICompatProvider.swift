@@ -115,8 +115,8 @@ final class OpenAICompatProvider: StreamingInterpretationProvider, LLMPinging {
             "temperature": 0.2,
             "stream": stream,
             "messages": [
-                ["role": "system", "content": LLMProviderSupport.systemPrompt],
-                ["role": "user", "content": LLMProviderSupport.userPrompt(term: text, context: context)]
+                ["role": "system", "content": config.explanationStyle.prompt],
+                ["role": "user", "content": config.explanationStyle.userPrompt(term: text, context: context)]
             ]
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)

@@ -3,7 +3,7 @@ import Foundation
 /// OpenAI Responses API（POST /responses）客户端。
 /// 与 Chat Completions 的差异：instructions 是顶层字段（替代 system message），input 可直接为字符串，
 /// 响应在 output[] 里按 type 分块（reasoning/message 交错），文本在 message 的 output_text 块中。
-final class OpenAIResponsesProvider: InterpretationProvider, LLMPinging {
+final class OpenAIResponsesProvider: StreamingInterpretationProvider, LLMPinging {
     typealias Config = LLMEndpointConfig
 
     private let config: Config
@@ -15,16 +15,8 @@ final class OpenAIResponsesProvider: InterpretationProvider, LLMPinging {
         self.session = session
     }
 
-    /// 非流式整包（Responses 的 SSE 事件结构不同，暂未做流式；等待感由其通常较快的响应兜底）
     func interpret(_ text: String, context: String?) async throws -> Interpretation {
-        let body: [String: Any] = [
-            "model": config.model,
-            "instructions": LLMProviderSupport.systemPrompt,
-            "input": LLMProviderSupport.userPrompt(term: text, context: context),
-            "temperature": 0.2,
-            "stream": false
-        ]
-        let data = try await send(body: body, timeout: nil)
+        let data = try await send(body: queryBody(text, context: context, stream: false), timeout: nil)
 
         let decoded: ResponsesReply
         do {
@@ -47,6 +39,31 @@ final class OpenAIResponsesProvider: InterpretationProvider, LLMPinging {
         )
     }
 
+    func interpretStreaming(
+        _ text: String, context: String?, onDelta: @escaping @MainActor (String) -> Void
+    ) async throws -> Interpretation {
+        let request = try makeRequest(body: queryBody(text, context: context, stream: true), timeout: nil)
+        return try await EventStream.interpret(term: text, request: request, session: session, decode: { data in
+            let event = try EventStream.decodeJSON(StreamEvent.self, from: data)
+            switch event.type {
+            case "response.output_text.delta": return .append(event.delta ?? "")
+            case "response.completed": return .done()
+            case "error", "response.failed", "response.incomplete": throw InterpretationError.badResponse
+            default: return .skip
+            }
+        }, onDelta: onDelta)
+    }
+
+    private func queryBody(_ text: String, context: String?, stream: Bool) -> [String: Any] {
+        [
+            "model": config.model,
+            "instructions": config.explanationStyle.prompt,
+            "input": config.explanationStyle.userPrompt(term: text, context: context),
+            "temperature": 0.2,
+            "stream": stream
+        ]
+    }
+
     /// 最小连通探测：最小输出上限压到 16（Responses 对推理模型要求 max_output_tokens ≥ 16）。
     func ping() async throws -> TimeInterval {
         let body: [String: Any] = [
@@ -61,7 +78,7 @@ final class OpenAIResponsesProvider: InterpretationProvider, LLMPinging {
     }
 
     /// 发送请求并做过错归类；timeout 传 nil 用 session 默认（20s），ping 显式压到 15s
-    private func send(body: [String: Any], timeout: TimeInterval?) async throws -> Data {
+    private func makeRequest(body: [String: Any], timeout: TimeInterval?) throws -> URLRequest {
         guard let url = responsesURL else {
             throw InterpretationError.badConfiguration
         }
@@ -71,7 +88,11 @@ final class OpenAIResponsesProvider: InterpretationProvider, LLMPinging {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return request
+    }
 
+    private func send(body: [String: Any], timeout: TimeInterval?) async throws -> Data {
+        let request = try makeRequest(body: body, timeout: timeout)
         let data: Data
         let response: URLResponse
         do {
@@ -89,6 +110,11 @@ final class OpenAIResponsesProvider: InterpretationProvider, LLMPinging {
             throw LLMProviderSupport.serverError(status: http.statusCode, data: data)
         }
         return data
+    }
+
+    private struct StreamEvent: Decodable {
+        let type: String
+        let delta: String?
     }
 
     /// 端点拼接：剥尾部斜杠后追加 /responses；无 scheme 视为非法配置

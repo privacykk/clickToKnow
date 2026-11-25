@@ -35,6 +35,19 @@ final class SecretIsolationTests: XCTestCase {
         APIProfile(id: id, apiProtocol: .openAICompatible, baseURL: baseURL, model: model)
     }
 
+    func test_savingChangedEndpointDoesNotReuseStoredKey() {
+        let config = makeConfig()
+        let original = config.upsertProfile(makeProfile())
+        XCTAssertTrue(config.setAPIKey("test-old-key", for: original))
+        let sameHost = makeProfile(id: original.id, baseURL: "https://api.deepseek.com/v1")
+        XCTAssertTrue(config.saveEditedProfile(sameHost))
+        XCTAssertNotNil(config.storedKeyMask(for: sameHost))
+        let differentHost = makeProfile(id: original.id, baseURL: "https://different.example/v1")
+        XCTAssertTrue(config.saveEditedProfile(differentHost))
+        XCTAssertEqual(config.activeProfile?.baseURL, differentHost.baseURL)
+        XCTAssertNil(config.storedKeyMask(for: differentHost))
+    }
+
     // MARK: - 问题 2：回退的明文/遗留密钥必须绑定归属配置
 
     /// 核心回归：A 保存失败（钥匙串不可用，回退明文）→ 切到 B，B 不得读到 A 的密钥。

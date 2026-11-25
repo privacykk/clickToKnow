@@ -6,12 +6,17 @@ enum ProviderFactory {
     /// 避免响应返回时配置已变导致缓存键/历史归属与实际请求不一致。
     static func snapshot(from config: AppConfig = .shared) -> QuerySnapshot {
         let profile = config.activeProfile
+        let localOnly = config.localDictionaryOnly
         return QuerySnapshot(
             profileID: profile?.id,
             apiProtocol: profile?.apiProtocol ?? .openAICompatible,
             baseURL: profile?.baseURL ?? "",
             model: profile?.model ?? "",
-            apiKey: config.effectiveAPIKey(for: profile)
+            apiKey: localOnly ? "" : config.effectiveAPIKey(for: profile),
+            localDictionaryOnly: localOnly,
+            sendsContext: config.sendsQueryContext,
+            explanationStyle: config.explanationStyle,
+            streamsResults: config.streamsLLMResults
         )
     }
 
@@ -22,7 +27,8 @@ enum ProviderFactory {
             endpoint: LLMEndpointConfig(
                 baseURL: snapshot.baseURL,
                 apiKey: snapshot.apiKey,
-                model: snapshot.model
+                model: snapshot.model,
+                explanationStyle: snapshot.explanationStyle
             ),
             apiProtocol: snapshot.apiProtocol
         )

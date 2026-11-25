@@ -102,4 +102,18 @@ final class AutoCloseSchedulerTests: XCTestCase {
         timer.fire() // 没东西可触发
         XCTAssertFalse(fired)
     }
+
+    func test_pinSurvivesMouseExitAndUnpinRestartsCountdown() {
+        scheduler.restart(duration: 15)
+        scheduler.setPinned(true)
+        scheduler.hoverChanged(true)
+        scheduler.hoverChanged(false)
+        XCTAssertTrue(timer.scheduled.isEmpty)
+        scheduler.setPinned(false)
+        XCTAssertEqual(timer.scheduled.first?.delay, 15)
+        scheduler.invalidate()
+        scheduler.hoverChanged(true)
+        scheduler.hoverChanged(false)
+        XCTAssertTrue(timer.scheduled.isEmpty)
+    }
 }

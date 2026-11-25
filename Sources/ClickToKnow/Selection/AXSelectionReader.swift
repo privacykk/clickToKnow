@@ -26,22 +26,25 @@ enum AXSelectionReader {
     /// 读取前台应用选区（主线程调用：NSScreen / NSWorkspace 有线程约束）。
     /// AX IPC 在后台队列执行并用 continuation 等待——主线程不再 semaphore 同步阻塞。
     @MainActor
-    static func readFrontmost(timeout: TimeInterval = defaultTimeout) async -> Result? {
+    static func readFrontmost(timeout: TimeInterval = defaultTimeout, includeContext: Bool = true) async -> Result? {
         // 前台应用即取词目标：全局热键触发时本应用并未激活，frontmost 仍是用户正在用的 App
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
         // 坐标翻转需要主屏高度：NSScreen 只能在主线程访问，提前取好传入后台
         let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
-        return await read(pid: app.processIdentifier, primaryHeight: primaryHeight, timeout: timeout)
+        return await read(pid: app.processIdentifier, primaryHeight: primaryHeight, timeout: timeout,
+                          includeContext: includeContext)
     }
 
     /// 异步读取指定进程的选区：超时返回 nil（调用方回退 ⌘C）。
     /// 超时后仍卡住的 IPC 线程由 messaging timeout 兜底结束，不会被无限期占用。
-    static func read(pid: pid_t, primaryHeight: CGFloat, timeout: TimeInterval = defaultTimeout) async -> Result? {
+    static func read(
+        pid: pid_t, primaryHeight: CGFloat, timeout: TimeInterval = defaultTimeout, includeContext: Bool = true
+    ) async -> Result? {
         await withCheckedContinuation { (continuation: CheckedContinuation<Result?, Never>) in
             // 工作线程与超时定时器会竞争同一个 continuation，必须保证只 resume 一次
             let gate = ResumeGate()
             DispatchQueue.global(qos: .userInitiated).async {
-                let result = readViaAX(pid: pid, primaryHeight: primaryHeight)
+                let result = readViaAX(pid: pid, primaryHeight: primaryHeight, includeContext: includeContext)
                 gate.resume(continuation, with: result)
             }
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + timeout) {
@@ -52,7 +55,7 @@ enum AXSelectionReader {
 
     // MARK: - AX IPC（后台线程）
 
-    private static func readViaAX(pid: pid_t, primaryHeight: CGFloat) -> Result? {
+    private static func readViaAX(pid: pid_t, primaryHeight: CGFloat, includeContext: Bool) -> Result? {
         let appElement = AXUIElementCreateApplication(pid)
         // 先设 messaging timeout：后面每一次 IPC 都受它约束
         AXUIElementSetMessagingTimeout(appElement, messagingTimeout)
@@ -73,7 +76,7 @@ enum AXSelectionReader {
         return Result(
             text: text,
             rect: range.flatMap { selectionRect(of: element, range: $0, primaryHeight: primaryHeight) },
-            context: range.flatMap { surroundingContext(of: element, range: $0, selectedText: text) }
+            context: includeContext ? range.flatMap { surroundingContext(of: element, range: $0, selectedText: text) } : nil
         )
     }
 
@@ -158,6 +161,7 @@ protocol SelectionReading {
 /// 生产实现：读前台应用选区（⌥⌘K 触发时本应用未激活，frontmost 即是取词目标）
 struct AXSelectionReaderAdapter: SelectionReading {
     func read() async -> AXSelectionReader.Result? {
-        await AXSelectionReader.readFrontmost()
+        let config = AppConfig.shared
+        return await AXSelectionReader.readFrontmost(includeContext: !config.localDictionaryOnly && config.sendsQueryContext)
     }
 }

@@ -11,6 +11,7 @@ final class AppConfig {
     /// LLM 配置（配置列表 / 生效项 / 密钥）变更后广播；
     /// AppStatusModel 监听后立即刷新，保证「大模型」与「状态总览」两页永远同一口径
     static let llmConfigChangedNotification = Notification.Name("ctkLLMConfigChanged")
+    static let privacyChangedNotification = Notification.Name("ctkPrivacyChanged")
 
     private let defaults: UserDefaults
     /// 密钥存储（生产 = 钥匙串）；单测注入可失败实现以覆盖回退与隔离路径
@@ -43,6 +44,11 @@ final class AppConfig {
         static let hotKeyKeyCode = "hotKeyKeyCode"
         static let hotKeyModifiers = "hotKeyModifiers"
         static let blacklistedBundleIDs = "blacklistedBundleIDs"
+        static let localDictionaryOnly = "localDictionaryOnly"
+        static let sendsQueryContext = "sendsQueryContext"
+        static let recordsQueryHistory = "recordsQueryHistory"
+        static let explanationStyle = "explanationStyle"
+        static let streamsLLMResults = "streamsLLMResults"
     }
 
     /// 单配置时代遗留的钥匙串 account（无 owner 归属时的历史存储位）
@@ -121,6 +127,17 @@ final class AppConfig {
             adoptLegacyKey(value, into: profile.id)
         }
         return profile
+    }
+
+    /// 修改端点来源前，必须先确认旧密钥已移除，再保存地址。
+    func saveEditedProfile(_ profile: APIProfile) -> Bool {
+        if let previous = apiProfiles.first(where: { $0.id == profile.id }),
+           !LLMProviderSupport.sameEndpointHost(previous.baseURL, profile.baseURL),
+           !clearAPIKey(for: previous) {
+            return false
+        }
+        upsertProfile(profile)
+        return true
     }
 
     /// 删除配置并清理其钥匙串密钥；激活项被删时切到剩余第一项（无剩余则回到系统词典兜底）
@@ -405,6 +422,45 @@ final class AppConfig {
 
     // MARK: - 应用黑名单
 
+    var explanationStyle: ExplanationStyle {
+        get { defaults.string(forKey: Key.explanationStyle).flatMap(ExplanationStyle.init(rawValue:)) ?? .technical }
+        set {
+            guard newValue != explanationStyle else { return }
+            defaults.set(newValue.rawValue, forKey: Key.explanationStyle)
+            notifyLLMConfigChanged()
+        }
+    }
+
+    var streamsLLMResults: Bool {
+        get { defaults.object(forKey: Key.streamsLLMResults) as? Bool ?? true }
+        set {
+            guard newValue != streamsLLMResults else { return }
+            defaults.set(newValue, forKey: Key.streamsLLMResults)
+            notifyLLMConfigChanged()
+        }
+    }
+
+    var localDictionaryOnly: Bool {
+        get { defaults.bool(forKey: Key.localDictionaryOnly) }
+        set { setPrivacyFlag(newValue, forKey: Key.localDictionaryOnly, previous: localDictionaryOnly) }
+    }
+
+    var sendsQueryContext: Bool {
+        get { defaults.object(forKey: Key.sendsQueryContext) as? Bool ?? true }
+        set { setPrivacyFlag(newValue, forKey: Key.sendsQueryContext, previous: sendsQueryContext) }
+    }
+
+    var recordsQueryHistory: Bool {
+        get { defaults.object(forKey: Key.recordsQueryHistory) as? Bool ?? true }
+        set { setPrivacyFlag(newValue, forKey: Key.recordsQueryHistory, previous: recordsQueryHistory) }
+    }
+
+    private func setPrivacyFlag(_ value: Bool, forKey key: String, previous: Bool) {
+        guard previous != value else { return }
+        defaults.set(value, forKey: key)
+        NotificationCenter.default.post(name: Self.privacyChangedNotification, object: self)
+    }
+
     /// 内置黑名单：密码/密钥管理类应用永不抓取，选中文本不离开本机、也不进剪贴板
     static let builtInBlacklistedBundleIDs: Set<String> = [
         "com.1password.1password",
@@ -416,8 +472,25 @@ final class AppConfig {
 
     /// 生效黑名单 = 内置 + 用户追加（`defaults write ClickToKnow blacklistedBundleIDs -array com.xxx.app`）
     var blacklistedBundleIDs: Set<String> {
-        let user = defaults.stringArray(forKey: Key.blacklistedBundleIDs) ?? []
-        return Self.builtInBlacklistedBundleIDs.union(user)
+        Self.builtInBlacklistedBundleIDs.union(customBlacklistedBundleIDs)
+    }
+
+    var customBlacklistedBundleIDs: [String] {
+        get {
+            let ids = defaults.stringArray(forKey: Key.blacklistedBundleIDs) ?? []
+            return Self.normalizedBundleIDs(ids)
+        }
+        set {
+            let ids = Self.normalizedBundleIDs(newValue)
+            guard ids != customBlacklistedBundleIDs else { return }
+            defaults.set(ids, forKey: Key.blacklistedBundleIDs)
+            NotificationCenter.default.post(name: Self.privacyChangedNotification, object: self)
+        }
+    }
+
+    private static func normalizedBundleIDs(_ ids: [String]) -> [String] {
+        Set(ids.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .subtracting(builtInBlacklistedBundleIDs).subtracting([""]).sorted()
     }
 
     // MARK: - 快捷键

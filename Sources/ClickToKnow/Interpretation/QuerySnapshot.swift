@@ -15,6 +15,9 @@ struct QuerySnapshot: Equatable {
     let apiKey: String
     /// 本次查询是否真的走 LLM。缺密钥且供应商要求鉴权时为 false → 回落系统词典
     let usesLLM: Bool
+    let explanationStyle: ExplanationStyle
+    let streamsResults: Bool
+    private let sendsContext: Bool
 
     /// 本次查询的释义来源，参与缓存键：同一端点在「缺密钥走词典」与「有密钥走 LLM」之间切换时
     /// 内容完全不同，必须分键，否则补上密钥后仍会命中旧的词典结果
@@ -23,7 +26,11 @@ struct QuerySnapshot: Equatable {
     /// 历史记录应归属的模型名；走词典时为 nil（历史里不谎报成某个模型）
     var historyModel: String? { usesLLM ? model : nil }
 
-    init(profileID: UUID?, apiProtocol: APIProtocol, baseURL: String, model: String, apiKey: String) {
+    init(
+        profileID: UUID?, apiProtocol: APIProtocol, baseURL: String, model: String, apiKey: String,
+        localDictionaryOnly: Bool = false, sendsContext: Bool = true,
+        explanationStyle: ExplanationStyle = .technical, streamsResults: Bool = true
+    ) {
         let sanitizedKey = LLMProviderSupport.sanitizedAPIKey(apiKey)
         self.profileID = profileID
         self.apiProtocol = apiProtocol
@@ -31,7 +38,15 @@ struct QuerySnapshot: Equatable {
         self.model = model
         self.apiKey = sanitizedKey
         // 判定规则与 AppConfig.hasLLMConfig 完全一致（端点/模型齐备 + 密钥或密钥可选预设）
-        self.usesLLM = AppConfig.llmStatus(baseURL: baseURL, apiKey: sanitizedKey, model: model) == .ready
+        self.usesLLM = !localDictionaryOnly
+            && AppConfig.llmStatus(baseURL: baseURL, apiKey: sanitizedKey, model: model) == .ready
+        self.sendsContext = sendsContext
+        self.explanationStyle = explanationStyle
+        self.streamsResults = streamsResults
+    }
+
+    func contextForRequest(_ context: String?) -> String? {
+        usesLLM && sendsContext ? context : nil
     }
 }
 

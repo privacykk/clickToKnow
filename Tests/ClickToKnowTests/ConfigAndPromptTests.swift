@@ -38,6 +38,39 @@ final class AppConfigBlacklistTests: XCTestCase {
     func test_noUserAdditions_fallsBackToBuiltInOnly() {
         XCTAssertEqual(config.blacklistedBundleIDs, AppConfig.builtInBlacklistedBundleIDs)
     }
+
+    func test_privacyDefaultsAndPersistence() {
+        XCTAssertFalse(config.localDictionaryOnly)
+        XCTAssertTrue(config.sendsQueryContext)
+        XCTAssertTrue(config.recordsQueryHistory)
+        config.localDictionaryOnly = true
+        config.sendsQueryContext = false
+        config.recordsQueryHistory = false
+        config.explanationStyle = .translation
+        config.customBlacklistedBundleIDs = [" com.acme.banking ", "com.acme.banking", "com.1password.1password"]
+
+        let reloaded = AppConfig(defaults: defaults, secrets: TestHelpers.InMemorySecretStore())
+        XCTAssertTrue(reloaded.localDictionaryOnly)
+        XCTAssertFalse(reloaded.sendsQueryContext)
+        XCTAssertFalse(reloaded.recordsQueryHistory)
+        XCTAssertEqual(reloaded.explanationStyle, .translation)
+        XCTAssertEqual(reloaded.customBlacklistedBundleIDs, ["com.acme.banking"])
+        XCTAssertTrue(reloaded.blacklistedBundleIDs.contains("com.1password.1password"))
+    }
+
+    func test_querySnapshotEnforcesPrivacyEvenWithReadyEndpoint() {
+        config.upsertProfile(APIProfile(apiProtocol: .openAICompatible, baseURL: "https://api.deepseek.com", model: "model"))
+        config.setAPIKey("test-only-key")
+        config.sendsQueryContext = false
+        let remote = ProviderFactory.snapshot(from: config)
+        XCTAssertTrue(remote.usesLLM)
+        XCTAssertNil(remote.contextForRequest("private context"))
+        config.localDictionaryOnly = true
+        let local = ProviderFactory.snapshot(from: config)
+        XCTAssertTrue(ProviderFactory.make(local) is SystemDictionaryProvider)
+        XCTAssertTrue(local.apiKey.isEmpty)
+        XCTAssertNil(local.contextForRequest("private context"))
+    }
 }
 
 /// LLM 用户消息构造：无上下文保持原有单行格式（回归），有上下文时附三引号块。

@@ -14,6 +14,7 @@ struct HistoryView: View {
     @State private var query = ""
     /// 来源筛选（全部 / 大模型 / 系统词典）
     @State private var sourceFilter: HistoryFilter.Source = .all
+    @State private var favoritesOnly = false
     /// 清空确认弹窗开关
     @State private var pendingClear = false
     /// 启动加载时的问题（如历史文件损坏已备份）：顶部常驻提示，避免用户以为数据莫名消失
@@ -45,6 +46,7 @@ struct HistoryView: View {
         .background(shortcutCatcher)
         .onAppear { reload() }
         .onChange(of: filter) { _ in reconcileSelection() }
+        .onChange(of: favoritesOnly) { _ in reconcileSelection() }
         .onReceive(NotificationCenter.default.publisher(for: HistoryStore.didChangeNotification)) { _ in
             reload()
         }
@@ -62,6 +64,9 @@ struct HistoryView: View {
             VStack(spacing: 8) {
                 searchField
                 filterBar
+                Toggle("仅显示收藏", isOn: $favoritesOnly)
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.horizontal, 12)
             .padding(.top, 10)
@@ -138,7 +143,7 @@ struct HistoryView: View {
                 filterChip(source)
             }
             Spacer(minLength: 0)
-            if filter.isActive {
+            if hasActiveFilters {
                 Button("重置") { resetFilter() }
                     .buttonStyle(.link)
                     .font(.caption)
@@ -196,6 +201,11 @@ struct HistoryView: View {
                 Text(entry.term)
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
+                if entry.isFavorite {
+                    Image(systemName: "star.fill")
+                        .accessibilityLabel("已收藏")
+                        .foregroundStyle(.secondary)
+                }
                 Spacer(minLength: 6)
                 Text(entry.date.formatted(date: .omitted, time: .shortened))
                     .font(.caption2)
@@ -224,6 +234,7 @@ struct HistoryView: View {
         .tag(entry.id)
         .contextMenu {
             Button("复制释义") { copy(entry) }
+            Button(entry.isFavorite ? "取消收藏" : "收藏") { HistoryStore.shared.toggleFavorite(id: entry.id) }
             Divider()
             Button("删除", role: .destructive) { delete(entry) }
         }
@@ -233,13 +244,13 @@ struct HistoryView: View {
     private var emptySidebar: some View {
         VStack(spacing: 8) {
             Spacer()
-            Image(systemName: filter.isActive ? "line.3.horizontal.decrease.circle" : "clock.arrow.circlepath")
+            Image(systemName: hasActiveFilters ? "line.3.horizontal.decrease.circle" : "clock.arrow.circlepath")
                 .font(.system(size: 30, weight: .light))
                 .foregroundStyle(.tertiary)
-            Text(filter.isActive ? "没有匹配的记录" : "还没有查询记录")
+            Text(hasActiveFilters ? "没有匹配的记录" : "还没有查询记录")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            if filter.isActive {
+            if hasActiveFilters {
                 Button("清除筛选") { resetFilter() }
                     .buttonStyle(.link)
             } else {
@@ -399,9 +410,11 @@ struct HistoryView: View {
         HistoryFilter(query: query, source: sourceFilter)
     }
 
+    private var hasActiveFilters: Bool { filter.isActive || favoritesOnly }
+
     /// 筛选后的记录（保持新 → 旧顺序）
     private var visibleEntries: [HistoryEntry] {
-        filter.apply(to: entries)
+        filter.apply(to: favoritesOnly ? entries.filter(\.isFavorite) : entries)
     }
 
     /// 当前选中条目（全量里找，避免筛选瞬间详情闪烁）
@@ -427,7 +440,7 @@ struct HistoryView: View {
 
     /// 底部计数：无筛选时只显示总数
     private var summaryText: String {
-        filter.isActive
+        hasActiveFilters
             ? "共 \(entries.count) 条 · 筛选后 \(visibleEntries.count) 条"
             : "共 \(entries.count) 条记录"
     }
@@ -444,7 +457,7 @@ struct HistoryView: View {
     private func reload() {
         entries = HistoryStore.shared.entries
         loadWarning = HistoryStore.shared.loadWarning
-        if let selection, entries.contains(where: { $0.id == selection }) {
+        if let selection, visibleEntries.contains(where: { $0.id == selection }) {
             return
         }
         selection = visibleEntries.first?.id
@@ -462,6 +475,7 @@ struct HistoryView: View {
     private func resetFilter() {
         query = ""
         sourceFilter = .all
+        favoritesOnly = false
     }
 
     // MARK: - 行为

@@ -5,9 +5,10 @@ enum SettingsTab: Hashable {
     case status
     case llm
     case hotKey
+    case privacy
 }
 
-/// 设置与状态中心根视图：三 Tab（状态总览 / 大模型 / 快捷键）。
+/// 设置与状态中心根视图。
 /// AppStatusModel 由窗口壳经 environmentObject 注入，各 Tab 只读消费；
 /// 页签选择提升到根视图，供状态总览的「去配置 / 去修改」直接跳转。
 struct SettingsRootView: View {
@@ -24,6 +25,9 @@ struct SettingsRootView: View {
             HotKeyTabView()
                 .tabItem { Label("快捷键", systemImage: "command") }
                 .tag(SettingsTab.hotKey)
+            PrivacySettingsTabView()
+                .tabItem { Label("隐私", systemImage: "hand.raised") }
+                .tag(SettingsTab.privacy)
         }
     }
 }

@@ -19,6 +19,7 @@ final class AppStatusModel: ObservableObject {
     @Published private(set) var hotKeyPaused = false
     /// LLM 是否可用（未配置时走系统词典兜底）
     @Published private(set) var llmReady = false
+    @Published private(set) var localDictionaryOnly = false
     /// LLM 细分配置状态：未配置 / 已配置但缺密钥 / 可用（状态总览与「大模型」页共用）
     @Published private(set) var llmStatus: AppConfig.LLMStatus = .notConfigured
     /// 当前生效的模型名；空串 = 尚无配置
@@ -111,6 +112,7 @@ final class AppStatusModel: ObservableObject {
 
     /// 诊断报告里的释义来源一句话（区分「未配置」与「已配置但缺密钥」）
     private var llmDiagnosticSummary: String {
+        if localDictionaryOnly { return "系统词典（仅本地查询）" }
         switch llmStatus {
         case .ready:
             return "大模型 · \(activeModel)"
@@ -168,6 +170,7 @@ final class AppStatusModel: ObservableObject {
         )
 
         let config = AppConfig.shared
+        localDictionaryOnly = config.localDictionaryOnly
         if let monitor = selectionMonitor {
             hotKeyBinding = monitor.currentBinding
             hotKeyRegistered = monitor.isHotKeyRegistered

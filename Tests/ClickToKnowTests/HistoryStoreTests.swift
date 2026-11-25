@@ -54,6 +54,21 @@ final class HistoryStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.entries.first?.content, "包管理器")
     }
 
+    func test_favoriteSurvivesEvictionAndReload() {
+        let id = store.add(makeInterpretation("helm"), model: nil)
+        XCTAssertEqual(store.toggleFavorite(id: id), true)
+        for index in 0..<500 {
+            store.add(makeInterpretation("word-\(index)"), model: nil)
+        }
+        store.flush()
+        let reloaded = HistoryStore(directory: directory)
+        XCTAssertEqual(reloaded.entries.count, 500)
+        XCTAssertEqual(reloaded.entries.last?.id, id)
+        XCTAssertTrue(reloaded.entries.last?.isFavorite == true)
+        XCTAssertEqual(reloaded.toggleFavorite(id: id), false)
+        reloaded.flush()
+    }
+
     /// CSV：含逗号/引号/换行的字段必须按 RFC 4180 加引号转义
     func test_exportCSV_escapesFields() {
         store.add(makeInterpretation("a,b", content: "含\"引号\"和\n换行"), model: nil)

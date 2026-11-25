@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKeyObserver: NSObjectProtocol?
     /// LLM 配置变更监听（清空查询缓存，防旧释义串味）
     private var configObserver: NSObjectProtocol?
+    private var privacyObserver: NSObjectProtocol?
 
     /// 查询代际：新查询、关闭弹窗、暂停、展示失败提示都会让旧会话失效，
     /// 过期响应（增量/成功/失败）在落到 UI 前统一校验，不再只靠「成功才换代」。
@@ -47,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 退出前把后台排队中的历史记录写完（写入是异步合并的，不 flush 会丢掉最后几条）
     func applicationWillTerminate(_ notification: Notification) {
+        if let privacyObserver { NotificationCenter.default.removeObserver(privacyObserver) }
         HistoryStore.shared.flush()
     }
 
@@ -78,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 菜单栏「暂停取词」开关：暂停期间不应再有在途查询落到 UI
         statusBarController?.onTogglePause = { [weak self] paused in
             self?.invalidateCurrentQuery()
+            if paused { self?.popover?.close() }
             self?.selectionMonitor?.setPaused(paused)
             self?.statusModel.refresh()
         }
@@ -101,7 +104,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
+                self?.invalidateCurrentQuery()
+                self?.popover?.close()
                 self?.cache.removeAll()
+            }
+        }
+        privacyObserver = NotificationCenter.default.addObserver(
+            forName: AppConfig.privacyChangedNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.invalidateCurrentQuery()
+                self?.popover?.close()
+                self?.cache.removeAll()
+                self?.statusModel.refresh()
             }
         }
     }
@@ -142,7 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             message = """
             **已跳过本次查询**
 
-            当前应用在黑名单中（密码/密钥管理类），选中文本不会被抓取。可用 `defaults write ClickToKnow blacklistedBundleIDs -array <bundleID>` 追加自定义条目。
+            当前应用在黑名单中，选中文本不会被抓取。可在「设置 → 隐私」管理自定义条目。
             """
         case .emptySelection:
             message = "**未抓取到文本**：请先选中一段文字再按快捷键。"
@@ -179,28 +194,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 选词完成的核心流程：缓存查询 → loading 反馈 → 流式/非流式释义 → 落历史。
     /// 流式增量与最终结果都校验会话代际，过期响应一律丢弃。
-    private func handleSelectedText(_ text: String, at location: NSPoint, context: String?) {
+    private func handleSelectedText(_ text: String, at location: NSPoint, context: String?, bypassCache: Bool = false) {
         invalidateCurrentQuery() // 新查询取代旧查询：旧请求立即断连而非仅丢弃结果
         let requestID = querySession.begin()
 
         // 查询开始时冻结配置：缓存键、Provider、历史归属都取自这一份快照，
         // 中途改配置/切模型不会让「按旧端点请求的结果写进新配置的缓存键」
         let snapshot = ProviderFactory.snapshot()
+        let requestContext = snapshot.contextForRequest(context)
 
         // 缓存键含来源、上下文与配置指纹：换供应商/模型、同词不同上下文、词典与 LLM 之间都不串
         let cacheKey = InterpretationCache.key(
             term: text,
-            context: context,
+            context: requestContext,
             source: snapshot.source,
             baseURL: snapshot.baseURL,
             model: snapshot.model,
             apiProtocol: snapshot.apiProtocol,
-            profileID: snapshot.profileID
+            profileID: snapshot.profileID,
+            explanationStyle: snapshot.explanationStyle
         )
-        if let cached = cache.get(cacheKey) {
+        let retry: () -> Void = { [weak self] in
+            self?.handleSelectedText(text, at: location, context: requestContext, bypassCache: true)
+        }
+        if !bypassCache, let cached = cache.get(cacheKey) {
             guard querySession.isCurrent(requestID) else { return }
-            show(cached, at: location)
-            HistoryStore.shared.add(cached, model: snapshot.historyModel)
+            let historyID = recordHistory(cached, snapshot: snapshot)
+            show(cached, at: location, historyID: historyID, retry: retry)
             return
         }
 
@@ -212,7 +232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         currentRequest = Task { [weak self] in
             do {
                 let result: Interpretation
-                if let streaming = provider as? StreamingInterpretationProvider {
+                if snapshot.streamsResults, let streaming = provider as? StreamingInterpretationProvider {
                     // 流式：增量按帧合并后再渲染（每个 delta 都全量解析 Markdown + 测高 + 定位
                     // 在长内容下都是主线程开销）；合并后只更新内容，不重装监视器、不重排倒计时，
                     // 否则悬停暂停每分钟都会被覆盖
@@ -220,18 +240,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         guard let self, self.querySession.isCurrent(requestID) else { return }
                         self.popover?.updateContent(MarkdownRenderer.render(partial))
                     }
-                    result = try await streaming.interpretStreaming(text, context: context) { partial in
+                    result = try await streaming.interpretStreaming(text, context: requestContext) { partial in
                         guard let self, self.querySession.isCurrent(requestID) else { return }
                         coalescer.push(partial)
                     }
                     coalescer.flush()
                 } else {
-                    result = try await provider.interpret(text, context: context)
+                    result = try await provider.interpret(text, context: requestContext)
                 }
                 guard let self, self.querySession.isCurrent(requestID) else { return } // 已被新查询/关闭取代
                 self.cache.put(cacheKey, result)
-                HistoryStore.shared.add(result, model: snapshot.historyModel)
-                self.show(result, at: location)
+                let historyID = self.recordHistory(result, snapshot: snapshot)
+                self.show(result, at: location, historyID: historyID, retry: retry)
             } catch is CancellationError {
                 // 弹窗已关闭或已被新查询取代：静默丢弃，不展示错误
             } catch {
@@ -244,18 +264,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 } else {
                     Log.llm.error("释义失败：\(type(of: error))")
                 }
-                self.showFailure(message, for: text, at: location)
+                self.showFailure(message, for: text, at: location, retry: retry)
             }
         }
     }
 
     /// 展示成功释义（Markdown 渲染后入弹窗，自动关闭沿用上次时限）
-    private func show(_ result: Interpretation, at location: NSPoint) {
-        popover?.show(MarkdownRenderer.render(result.content), at: location)
+    private func recordHistory(_ result: Interpretation, snapshot: QuerySnapshot) -> HistoryEntry.ID? {
+        guard AppConfig.shared.recordsQueryHistory else { return nil }
+        return HistoryStore.shared.add(result, model: snapshot.historyModel)
+    }
+
+    private func show(
+        _ result: Interpretation, at location: NSPoint, historyID: HistoryEntry.ID?, retry: @escaping () -> Void
+    ) {
+        popover?.show(MarkdownRenderer.render(result.content), at: location, result: result, retry: retry,
+                      toggleFavorite: historyID.map { id in { HistoryStore.shared.toggleFavorite(id: id) } })
     }
 
     /// 展示失败提示：附设置入口指引，便于自查配置
-    private func showFailure(_ message: String, for text: String, at location: NSPoint) {
+    private func showFailure(_ message: String, for text: String, at location: NSPoint, retry: @escaping () -> Void) {
         let hint = """
         **未能查询：\(text)**
 
@@ -263,7 +291,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         ▸ 可在菜单栏「设置…」检查 Base URL / Model / 密钥
         """
-        popover?.show(MarkdownRenderer.render(hint), at: location)
+        popover?.show(MarkdownRenderer.render(hint), at: location, retry: retry)
     }
 
     /// 首次启动弹系统授权框（AX 直读与模拟 ⌘C 都依赖辅助功能权限）。

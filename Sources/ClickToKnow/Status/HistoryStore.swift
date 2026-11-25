@@ -13,6 +13,8 @@ struct HistoryEntry: Codable, Equatable, Identifiable, Sendable {
     let model: String?
     /// 查询时间
     let date: Date
+    var favorite: Bool?
+    var isFavorite: Bool { favorite == true }
 
     /// date/id 缺省自动生成，常规写入无需关心
     init(term: String, content: String, source: String, model: String?, date: Date = Date(), id: UUID = UUID()) {
@@ -64,18 +66,33 @@ final class HistoryStore {
     }
 
     /// 追加一条记录（插到最前）并裁剪到容量上限，随后异步落盘
-    func add(_ interpretation: Interpretation, model: String?) {
-        entries.insert(HistoryEntry(
+    @discardableResult
+    func add(_ interpretation: Interpretation, model: String?) -> HistoryEntry.ID {
+        let entry = HistoryEntry(
             term: interpretation.term,
             content: interpretation.content,
             source: interpretation.source.rawValue,
             model: model
-        ), at: 0)
+        )
+        entries.insert(entry, at: 0)
         if entries.count > capacity {
-            entries.removeLast(entries.count - capacity)
+            let index = entries.indices.dropFirst().last(where: { !entries[$0].isFavorite })
+                ?? entries.index(before: entries.endIndex)
+            entries.remove(at: index)
         }
         save()
         notifyChange()
+        return entry.id
+    }
+
+    @discardableResult
+    func toggleFavorite(id: HistoryEntry.ID) -> Bool? {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return nil }
+        let favorite = !entries[index].isFavorite
+        entries[index].favorite = favorite
+        save()
+        notifyChange()
+        return favorite
     }
 
     /// 删除单条记录（id 不存在时忽略）并落盘

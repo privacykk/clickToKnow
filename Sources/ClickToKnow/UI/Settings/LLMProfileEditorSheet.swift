@@ -407,21 +407,15 @@ struct LLMProfileEditorSheet: View {
         let config = AppConfig.shared
         // 环境变量/.env 对所有配置优先生效，与划词读取链一致
         if config.apiKeyFromEnvironment { return config.effectiveAPIKey(for: nil) }
-        guard let existing, Self.sameEndpointHost(existing.baseURL, baseURL) else { return "" }
+        guard let existing, LLMProviderSupport.sameEndpointHost(existing.baseURL, baseURL) else { return "" }
         return config.effectiveAPIKey(for: existing)
-    }
-
-    /// 表单地址与已存配置是否指向同一主机（scheme://host:port）
-    private static func sameEndpointHost(_ savedURL: String, _ formURL: String) -> Bool {
-        let savedHost = LLMProviderSupport.endpointHost(savedURL)
-        return !savedHost.isEmpty && savedHost == LLMProviderSupport.endpointHost(formURL)
     }
 
     /// 端点主机已改动且存在可沿用的已存密钥：测试/拉取不会带上该密钥，需要提示用户重新确认
     private var storedKeyBlockedByHostChange: Bool {
         guard let existing, existingKeyMask != nil else { return false }
         guard LLMProviderSupport.sanitizedAPIKey(apiKeyInput).isEmpty else { return false }
-        return !Self.sameEndpointHost(existing.baseURL, baseURL)
+        return !LLMProviderSupport.sameEndpointHost(existing.baseURL, baseURL)
     }
 
     /// 用表单当前值测试（而非已保存值），保存前即可发现问题
@@ -496,8 +490,9 @@ struct LLMProfileEditorSheet: View {
         notice = nil
         noticeIsError = false
         let trimmedURL = baseURL.trimmingCharacters(in: .whitespaces)
-        guard trimmedURL.hasPrefix("http://") || trimmedURL.hasPrefix("https://") else {
-            notice = "Base URL 需以 http:// 或 https:// 开头，尚未保存"
+        guard (trimmedURL.hasPrefix("http://") || trimmedURL.hasPrefix("https://")),
+              !LLMProviderSupport.endpointHost(trimmedURL).isEmpty else {
+            notice = "请输入有效的 HTTP 或 HTTPS Base URL"
             noticeIsError = true
             return
         }
@@ -509,17 +504,22 @@ struct LLMProfileEditorSheet: View {
         }
 
         let config = AppConfig.shared
-        let profile = config.upsertProfile(APIProfile(
+        let profile = APIProfile(
             id: existing?.id ?? UUID(),
             apiProtocol: apiProtocol,
             baseURL: trimmedURL,
             model: trimmedModel
-        ))
+        )
+        guard config.saveEditedProfile(profile) else {
+            notice = "无法确认旧端点的密钥已清除。请先清除密钥，再保存新的 Base URL。"
+            noticeIsError = true
+            return
+        }
         if activate {
             config.activeProfileID = profile.id
         }
 
-        // 密钥留空 = 保持已存密钥不变（清除走专门按钮，避免误清）
+        // 同一端点留空时沿用已存密钥，新端点只使用显式输入的密钥。
         let keyInput = LLMProviderSupport.sanitizedAPIKey(apiKeyInput)
         // 回退到的本地明文会绑定该配置的归属，非生效配置同样可安全保存，因此只有一个「没进钥匙串」标记
         let keychainFallback = !keyInput.isEmpty && !config.setAPIKey(keyInput, for: profile)

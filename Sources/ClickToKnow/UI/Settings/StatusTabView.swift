@@ -51,12 +51,14 @@ struct StatusTabView: View {
                 LabeledContent("当前来源") {
                     HStack(spacing: 10) {
                         StatusBadge(level: llmBadgeLevel, text: llmBadgeText)
-                        if statusModel.llmStatus != .ready {
+                        if statusModel.localDictionaryOnly {
+                            Button("隐私设置") { selection = .privacy }
+                        } else if statusModel.llmStatus != .ready {
                             Button(statusModel.profileCount == 0 ? "去配置" : "去补全") { selection = .llm }
                         }
                     }
                 }
-                if statusModel.llmStatus != .notConfigured {
+                if !statusModel.localDictionaryOnly && statusModel.llmStatus != .notConfigured {
                     LabeledContent("模型") {
                         HStack(spacing: 6) {
                             Text(statusModel.activeModel)
@@ -89,7 +91,12 @@ struct StatusTabView: View {
 
             Section("运行时") {
                 LabeledContent("版本") {
-                    Text(AppStatusModel.version)
+                    HStack {
+                        Text(AppStatusModel.version)
+                        if let releases = URL(string: "https://github.com/privacykk/clickToKnow/releases/latest") {
+                            Link("查看最新版本", destination: releases)
+                        }
+                    }
                 }
                 LabeledContent("可执行路径") {
                     Text(statusModel.executablePath)
@@ -151,6 +158,9 @@ struct StatusTabView: View {
         case .granted:
             break
         }
+        if statusModel.localDictionaryOnly {
+            return statusModel.hotKeyPaused || statusModel.hotKeyRegistered ? nil : ("去修改快捷键", .tab(.hotKey))
+        }
         switch statusModel.llmStatus {
         case .notConfigured:
             return ("去配置大模型", .tab(.llm))
@@ -166,14 +176,14 @@ struct StatusTabView: View {
 
     private var summaryIcon: String {
         if !statusModel.accessibilityGranted { return "exclamationmark.triangle.fill" }
-        if statusModel.llmStatus != .ready { return "exclamationmark.triangle.fill" }
+        if !statusModel.localDictionaryOnly && statusModel.llmStatus != .ready { return "exclamationmark.triangle.fill" }
         if statusModel.hotKeyPaused { return "pause.circle.fill" }
         if !statusModel.hotKeyRegistered { return "exclamationmark.triangle.fill" }
         return "checkmark.seal.fill"
     }
 
     private var summaryColor: Color {
-        if !statusModel.accessibilityGranted || statusModel.llmStatus != .ready { return .orange }
+        if !statusModel.accessibilityGranted || (!statusModel.localDictionaryOnly && statusModel.llmStatus != .ready) { return .orange }
         if statusModel.hotKeyPaused || !statusModel.hotKeyRegistered { return .orange }
         return .green
     }
@@ -183,6 +193,10 @@ struct StatusTabView: View {
         case .invalidated: return "还不能用：辅助功能授权已失效"
         case .notGranted: return "还不能用：缺少辅助功能权限"
         case .granted: break
+        }
+        if statusModel.localDictionaryOnly {
+            if statusModel.hotKeyPaused { return "取词已暂停" }
+            return statusModel.hotKeyRegistered ? "系统词典已就绪" : "快捷键未注册"
         }
         switch statusModel.llmStatus {
         case .notConfigured:
@@ -204,6 +218,9 @@ struct StatusTabView: View {
             return "划词释义依赖模拟 ⌘C。点「去授权」会弹出系统授权提示并打开辅助功能面板，勾选 ClickToKnow 即可。"
         case .granted:
             break
+        }
+        if statusModel.localDictionaryOnly {
+            return "当前查询仅使用 macOS 系统词典。可在「隐私」中更改。"
         }
         switch statusModel.llmStatus {
         case .notConfigured:
@@ -289,10 +306,11 @@ struct StatusTabView: View {
 
     /// 未配置 / 缺密钥都算「未就绪」，用橙色而非红色：系统词典兜底本身仍可用
     private var llmBadgeLevel: StatusBadge.Level {
-        statusModel.llmStatus == .ready ? .ok : .warn
+        statusModel.localDictionaryOnly || statusModel.llmStatus == .ready ? .ok : .warn
     }
 
     private var llmBadgeText: String {
+        if statusModel.localDictionaryOnly { return "系统词典（仅本地）" }
         switch statusModel.llmStatus {
         case .ready: return statusModel.activeModel
         case .missingKey: return "缺少密钥（回落系统词典）"
