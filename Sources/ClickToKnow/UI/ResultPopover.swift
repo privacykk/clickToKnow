@@ -133,7 +133,7 @@ final class ResultPopover: NSObject {
     /// 首次展示（或切换到一条新内容）：定尺寸定位 → 装监视器 → 排倒计时 → 上屏。
     /// 流式增量请走 `updateContent`，否则每帧重装监视器与重排倒计时会把悬停暂停覆盖掉。
     func show(
-        _ attributed: NSAttributedString, at mouse: NSPoint, autoCloseAfter: TimeInterval = 15,
+        _ attributed: NSAttributedString, at mouse: NSPoint, autoCloseAfter: TimeInterval? = 15,
         result: Interpretation? = nil, retry: (() -> Void)? = nil, toggleFavorite: (() -> Bool?)? = nil
     ) {
         self.result = result

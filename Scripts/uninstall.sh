@@ -4,11 +4,11 @@
 # 顺序有讲究：钥匙串条目必须在删除 .app 之前处理（条目的访问控制只信任原应用），
 # 所以钥匙串清理排在删应用之前：
 #   1) 定位 .app → 2) 退出进程 → 3) 删钥匙串密钥 → 4) 清 UserDefaults
-#   → 5) 处理自启/登录项 → 6) 删 .app → 7) 处理生词本与 .env → 8) 残留清单
+#   → 5) 处理自启/登录项 → 6) 删 .app → 7) 处理历史数据与 .env → 8) 残留清单
 #
 # 用法：
-#   ./Scripts/uninstall.sh            # 默认：卸载应用与凭据，保留生词本与 ~/.clicktoknow
-#   ./Scripts/uninstall.sh --purge     # 彻底卸载：额外删除 history.json（含整个数据目录）与 ~/.clicktoknow
+#   ./Scripts/uninstall.sh            # 默认：卸载应用与凭据，保留历史数据库与 ~/.clicktoknow
+#   ./Scripts/uninstall.sh --purge     # 彻底卸载：额外删除历史数据库 history.sqlite3 及备份（整个数据目录）与 ~/.clicktoknow
 #   ./Scripts/uninstall.sh --dry-run   # 预演：逐条打印将执行的操作（含钥匙串目标账号），零副作用
 #   ./Scripts/uninstall.sh --help      # 显示本帮助
 #
@@ -33,7 +33,8 @@ PREFS_KEY="apiProfiles"                                      # AppConfig.Key.api
 LEGACY_KEYCHAIN_ACCOUNT="apiKey"                             # AppConfig.legacyKeychainAccount
 ENV_DIR="$HOME/.clicktoknow"                                 # EnvLoader 读取的 .env 目录
 SUPPORT_DIR="$HOME/Library/Application Support/ClickToKnow"  # HistoryStore 的数据目录
-HISTORY_FILE="$SUPPORT_DIR/history.json"                     # HistoryStore 的生词本文件
+HISTORY_DB="$SUPPORT_DIR/history.sqlite3"                    # 历史数据库（SQLite）
+# 同目录下还可能有迁移备份 history.migrated.json 与损坏备份 history.corrupt-*.json
 
 PURGE=0
 DRY_RUN=0
@@ -43,8 +44,8 @@ usage() {
 ClickToKnow 卸载脚本
 
 用法：
-  ./Scripts/uninstall.sh            默认：卸载应用与凭据，保留生词本与 ~/.clicktoknow
-  ./Scripts/uninstall.sh --purge    彻底卸载：额外删除 history.json 与 ~/.clicktoknow
+  ./Scripts/uninstall.sh            默认：卸载应用与凭据，保留历史数据库与 ~/.clicktoknow
+  ./Scripts/uninstall.sh --purge    彻底卸载：额外删除历史数据库 history.sqlite3 及备份与 ~/.clicktoknow
   ./Scripts/uninstall.sh --dry-run  预演：只打印将要执行的操作，不产生任何改动
   ./Scripts/uninstall.sh --help     显示本帮助
 
@@ -95,7 +96,7 @@ if [ "$DRY_RUN" = "1" ]; then
     echo "== 预演模式（--dry-run）：不会调用 security 写操作、不会 delete defaults、不会删除任何文件"
     echo
 else
-    echo "== 开始卸载 ${APP_NAME}（默认保留生词本与 .env；加 --purge 才彻底删除）"
+    echo "== 开始卸载 ${APP_NAME}（默认保留历史数据库与 .env；加 --purge 才彻底删除）"
     echo
 fi
 
@@ -320,20 +321,20 @@ else
     add_residual "应用本体未找到：若装在其他位置，请设置 APP_PATH 重跑脚本或手动删除"
 fi
 
-# ---------- 7/8 用户数据（生词本 / .env） ----------
+# ---------- 7/8 用户数据（历史数据库 / .env） ----------
 
-say "7/8 处理用户数据（生词本 / .env）"
+say "7/8 处理用户数据（历史数据库 / .env）"
 if [ -e "$SUPPORT_DIR" ]; then
     if [ "$PURGE" = "1" ]; then
         run rm -rf "$SUPPORT_DIR"
         if [ "$DRY_RUN" = "1" ]; then
-            note "彻底卸载：将删除 ${SUPPORT_DIR}（含生词本 ${HISTORY_FILE}）"
+            note "彻底卸载：将删除 ${SUPPORT_DIR}（含历史数据库 ${HISTORY_DB} 与迁移/损坏备份）"
         else
-            note "彻底卸载：已处理 ${SUPPORT_DIR}（含生词本 ${HISTORY_FILE}）"
+            note "彻底卸载：已处理 ${SUPPORT_DIR}（含历史数据库 ${HISTORY_DB} 与迁移/损坏备份）"
         fi
     else
         note "保留：${SUPPORT_DIR}"
-        note "      └ 生词本文件 ${HISTORY_FILE} 未删除（默认保留数据；如需一并删除请加 --purge）"
+        note "      └ 历史数据库 ${HISTORY_DB} 与备份未删除（默认保留数据；如需一并删除请加 --purge）"
     fi
 else
     note "无 ${SUPPORT_DIR}，跳过"
@@ -376,9 +377,9 @@ echo "   ${DEL_VERB}：应用本体 ${APP:-（未找到）}"
 echo "   ${DEL_VERB}：UserDefaults domain ${PREFS_SUITE} / ${BUNDLE_ID}"
 echo "   ${DEL_VERB}：钥匙串 service ${KEYCHAIN_SERVICE} 下按配置账号与遗留账号 ${LEGACY_KEYCHAIN_ACCOUNT} 的条目"
 if [ "$PURGE" = "1" ]; then
-    echo "   ${DEL_VERB}：${SUPPORT_DIR}（生词本 history.json）与 ${ENV_DIR}"
+    echo "   ${DEL_VERB}：${SUPPORT_DIR}（历史数据库 history.sqlite3 及备份）与 ${ENV_DIR}"
 else
-    echo "   保留：${SUPPORT_DIR}（生词本 history.json）与 ${ENV_DIR}"
+    echo "   保留：${SUPPORT_DIR}（历史数据库 history.sqlite3 及备份）与 ${ENV_DIR}"
 fi
 
 if [ "${#RESIDUALS[@]}" -gt 0 ]; then

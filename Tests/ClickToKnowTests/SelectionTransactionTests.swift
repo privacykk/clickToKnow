@@ -110,6 +110,8 @@ final class SelectionTransactionTests: XCTestCase {
     private var secureInput = false
     private var frontmostPID: pid_t? = 4242
     private var frontmostBundleID: String? = "com.example.editor"
+    /// 事务期间「用户按下 ⌘C」的模拟回调（由被测对象注册，事务结束应注销）
+    private var userCopyHandler: (() -> Void)?
 
     override func setUp() {
         super.setUp()
@@ -123,6 +125,7 @@ final class SelectionTransactionTests: XCTestCase {
         secureInput = false
         frontmostPID = 4242
         frontmostBundleID = "com.example.editor"
+        userCopyHandler = nil
     }
 
     /// simulateCopy 缺省模拟「⌘C 复制出了 helm」
@@ -136,6 +139,10 @@ final class SelectionTransactionTests: XCTestCase {
         environment.mouseLocation = { NSPoint(x: 100, y: 200) }
         environment.simulateCopy = simulateCopy ?? { [unowned self] in
             self.pasteboard.simulateCopyWrite("helm")
+        }
+        environment.observeUserCopyKeyPress = { [unowned self] handler in
+            self.userCopyHandler = handler
+            return { [unowned self] in self.userCopyHandler = nil }
         }
         return SelectionMonitor(
             onSelected: { [unowned self] text, _, context in
@@ -371,6 +378,92 @@ final class SelectionTransactionTests: XCTestCase {
         await monitor.performSelection()
         XCTAssertEqual(pasteboard.saveCount, 0)
         XCTAssertEqual(pasteboard.restoreCount, 0)
+    }
+
+    // MARK: - 交付前复核隐私条件
+
+    /// AX 直读成功但等待期间前台应用已切换：结果不得交付
+    func test_axResultDroppedWhenTargetSwitchesBeforeDelivery() async {
+        reader.results = [AXSelectionReader.Result(text: "helm", rect: nil, context: nil)]
+        reader.onRead = { [unowned self] in self.frontmostPID = 999 }
+        let monitor = makeMonitor()
+
+        await monitor.performSelection()
+
+        XCTAssertTrue(selected.isEmpty, "交付前必须复核前台应用，切走后不得交出结果")
+        XCTAssertEqual(failures, [.targetChanged])
+        XCTAssertFalse(monitor.isProcessing, "作废也要释放互斥")
+    }
+
+    /// AX 直读成功但等待期间目标被加入禁止名单：结果不得交付
+    func test_axResultDroppedWhenTargetBecomesBlacklisted() async {
+        reader.results = [AXSelectionReader.Result(text: "helm", rect: nil, context: nil)]
+        reader.onRead = { [unowned self] in self.frontmostBundleID = "com.1password.1password" }
+        let monitor = makeMonitor()
+
+        await monitor.performSelection()
+
+        XCTAssertTrue(selected.isEmpty)
+        XCTAssertEqual(failures, [.blacklistedApp])
+    }
+
+    /// AX 直读成功但等待期间进入安全输入态：结果不得交付
+    func test_axResultDroppedWhenSecureInputTurnsOnBeforeDelivery() async {
+        reader.results = [AXSelectionReader.Result(text: "helm", rect: nil, context: nil)]
+        reader.onRead = { [unowned self] in self.secureInput = true }
+        let monitor = makeMonitor()
+
+        await monitor.performSelection()
+
+        XCTAssertTrue(selected.isEmpty)
+        XCTAssertEqual(failures, [.secureInputActive])
+    }
+
+    // MARK: - 剪贴板兜底不误用/不覆盖用户复制
+
+    /// 核心回归：事务期间用户自己按 ⌘C 复制了内容 ——
+    /// 既不得把它当成选词去查询，也不得用旧快照覆盖用户的新内容。
+    func test_userCopyDuringTransactionIsNeitherQueriedNorOverwritten() async {
+        reader.results = [nil]
+        pasteboard.text = "用户原有内容"
+        // 模拟 ⌘C 尚未生效：第一次轮询看不到变化，进入轮询等待
+        let monitor = makeMonitor(simulateCopy: {})
+        let task = Task { await monitor.performSelection() }
+        await Task.yield()
+        XCTAssertEqual(pasteboard.saveCount, 1, "事务已开始")
+        XCTAssertNotNil(userCopyHandler, "事务期间应监听用户手动 ⌘C")
+
+        userCopyHandler?() // 用户按了 ⌘C
+        pasteboard.simulateCopyWrite("用户手动复制的内容")
+        scheduler.runNext()
+        await task.value
+
+        XCTAssertTrue(selected.isEmpty, "用户手动复制的内容不得被当成选词")
+        XCTAssertEqual(pasteboard.abandonCount, 1, "不得恢复旧快照覆盖用户新内容")
+        XCTAssertEqual(pasteboard.restoreCount, 0)
+        XCTAssertEqual(failures, [.clipboardChangedExternally])
+        XCTAssertFalse(monitor.isProcessing)
+        XCTAssertNil(userCopyHandler, "事务结束必须注销全局键监听")
+    }
+
+    /// 复制期间前台应用已切换：结果仍要恢复剪贴板，但不得交付
+    func test_targetSwitchDuringClipboardWaitDropsResultAndRestores() async {
+        reader.results = [nil]
+        pasteboard.text = "原内容"
+        pasteboard.autoCompleteRestore = false
+        let monitor = makeMonitor(simulateCopy: { [unowned self] in
+            self.pasteboard.simulateCopyWrite("helm")
+            self.frontmostPID = 999 // 复制生效后用户切走了应用
+        })
+
+        await monitor.performSelection()
+
+        XCTAssertTrue(selected.isEmpty)
+        XCTAssertEqual(failures, [.targetChanged])
+        XCTAssertEqual(pasteboard.restoreCount, 1, "结果不交付也要把用户剪贴板恢复回去")
+        XCTAssertTrue(monitor.isProcessing, "恢复完成前不释放互斥")
+        pasteboard.completeRestore()
+        XCTAssertFalse(monitor.isProcessing)
     }
 
     /// 固定返回单个结果的读取器（锚点用例用）

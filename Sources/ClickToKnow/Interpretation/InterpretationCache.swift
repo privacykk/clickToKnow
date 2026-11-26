@@ -100,6 +100,15 @@ final class InterpretationCache {
         touch(key)
     }
 
+    /// 按查询指纹淘汰：历史记录被删除 / 清空 / 自动裁剪后，对应的内存缓存也必须失效，
+    /// 否则「删除记录后仍能命中旧结果」会让用户以为删除没生效。
+    func removeEntries(matchingFingerprints fingerprints: Set<String>) {
+        guard !fingerprints.isEmpty else { return }
+        let doomed = store.keys.filter { fingerprints.contains(QueryFingerprint.make(from: $0)) }
+        for key in doomed { store.removeValue(forKey: key) }
+        accessOrder.removeAll { fingerprints.contains(QueryFingerprint.make(from: $0)) }
+    }
+
     /// 清空缓存（配置变更 / 手动清理后由调用方触发，防旧释义串味）
     func removeAll() {
         store.removeAll()

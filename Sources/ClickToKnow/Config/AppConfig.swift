@@ -12,6 +12,8 @@ final class AppConfig {
     /// AppStatusModel 监听后立即刷新，保证「大模型」与「状态总览」两页永远同一口径
     static let llmConfigChangedNotification = Notification.Name("ctkLLMConfigChanged")
     static let privacyChangedNotification = Notification.Name("ctkPrivacyChanged")
+    /// 历史保留条数变更：历史库据此裁剪并刷新占用展示
+    static let historyRetentionChangedNotification = Notification.Name("ctkHistoryRetentionChanged")
 
     private let defaults: UserDefaults
     /// 密钥存储（生产 = 钥匙串）；单测注入可失败实现以覆盖回退与隔离路径
@@ -51,6 +53,8 @@ final class AppConfig {
         static let recordsQueryHistory = "recordsQueryHistory"
         static let explanationStyle = "explanationStyle"
         static let streamsLLMResults = "streamsLLMResults"
+        static let historyRetentionLimit = "historyRetentionLimit"
+        static let reusesQueryHistory = "reusesQueryHistory"
     }
 
     /// 单配置时代遗留的钥匙串 account（无 owner 归属时的历史存储位）
@@ -467,6 +471,28 @@ final class AppConfig {
     var sendsQueryContext: Bool {
         get { defaults.object(forKey: Key.sendsQueryContext) as? Bool ?? true }
         set { setPrivacyFlag(newValue, forKey: Key.sendsQueryContext, previous: sendsQueryContext) }
+    }
+
+    /// 历史保留条数（默认 500；只接受 HistoryRetention 档位，损坏值回落到默认档）
+    var historyRetentionLimit: Int {
+        get {
+            guard let stored = defaults.object(forKey: Key.historyRetentionLimit) as? Int else {
+                return HistoryRetention.defaultLimit
+            }
+            return HistoryRetention.clamped(stored)
+        }
+        set {
+            let clamped = HistoryRetention.clamped(newValue)
+            guard clamped != historyRetentionLimit else { return }
+            defaults.set(clamped, forKey: Key.historyRetentionLimit)
+            NotificationCenter.default.post(name: Self.historyRetentionChangedNotification, object: self)
+        }
+    }
+
+    /// 是否优先复用本地历史释义（关闭保存历史时即使开着也不复用，但不删除已有记录）
+    var reusesQueryHistory: Bool {
+        get { defaults.object(forKey: Key.reusesQueryHistory) as? Bool ?? true }
+        set { setPrivacyFlag(newValue, forKey: Key.reusesQueryHistory, previous: reusesQueryHistory) }
     }
 
     var recordsQueryHistory: Bool {

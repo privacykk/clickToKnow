@@ -2,7 +2,7 @@ import XCTest
 
 @testable import ClickToKnow
 
-/// 历史记录：新→旧排序、容量淘汰、CSV/Anki 导出转义、磁盘持久化 round-trip。
+/// 历史记录（UI 门面）：新→旧排序、容量淘汰、CSV/Anki 导出转义、SQLite 持久化 round-trip。
 /// 每个用例用独立临时目录，不触碰真实的 Application Support 数据。
 @MainActor
 final class HistoryStoreTests: XCTestCase {
@@ -13,7 +13,7 @@ final class HistoryStoreTests: XCTestCase {
         super.setUp()
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ClickToKnowTests-\(UUID().uuidString)", isDirectory: true)
-        store = HistoryStore(directory: directory)
+        store = makeStore()
     }
 
     override func tearDown() {
@@ -21,6 +21,13 @@ final class HistoryStoreTests: XCTestCase {
         store = nil
         directory = nil
         super.tearDown()
+    }
+
+    /// 同步准备的历史库（异步准备会让断言依赖调度时机）
+    private func makeStore() -> HistoryStore {
+        let store = HistoryStore(directory: directory, autostart: false)
+        store.prepareSynchronously()
+        return store
     }
 
     /// 构造测试用释义
@@ -40,15 +47,21 @@ final class HistoryStoreTests: XCTestCase {
         for index in 0..<510 {
             store.add(makeInterpretation("term-\(index)"), model: nil)
         }
+        store.flush()
         XCTAssertEqual(store.entries.count, 500)
         XCTAssertEqual(store.entries.first?.term, "term-509")
         XCTAssertEqual(store.entries.last?.term, "term-10")
+
+        // 磁盘上同样只保留 500 条
+        let reloaded = makeStore()
+        XCTAssertEqual(reloaded.entries.count, 500)
+        XCTAssertEqual(reloaded.entries.last?.term, "term-10")
     }
 
     func test_persistenceRoundTrip() {
         store.add(makeInterpretation("helm", content: "包管理器"), model: "deepseek-chat")
         store.flush()
-        let reloaded = HistoryStore(directory: directory)
+        let reloaded = makeStore()
         XCTAssertEqual(reloaded.entries.count, 1)
         XCTAssertEqual(reloaded.entries.first?.term, "helm")
         XCTAssertEqual(reloaded.entries.first?.content, "包管理器")
@@ -61,9 +74,9 @@ final class HistoryStoreTests: XCTestCase {
             store.add(makeInterpretation("word-\(index)"), model: nil)
         }
         store.flush()
-        let reloaded = HistoryStore(directory: directory)
+        let reloaded = makeStore()
         XCTAssertEqual(reloaded.entries.count, 500)
-        XCTAssertEqual(reloaded.entries.last?.id, id)
+        XCTAssertEqual(reloaded.entries.last?.id, id, "收藏不被自动淘汰")
         XCTAssertTrue(reloaded.entries.last?.isFavorite == true)
         XCTAssertEqual(reloaded.toggleFavorite(id: id), false)
         reloaded.flush()
@@ -90,7 +103,7 @@ final class HistoryStoreTests: XCTestCase {
         store.removeAll()
         XCTAssertTrue(store.entries.isEmpty)
         store.flush()
-        XCTAssertEqual(HistoryStore(directory: directory).entries.count, 0)
+        XCTAssertEqual(makeStore().entries.count, 0)
     }
 
     /// 单条删除只移除目标记录，其余顺序与磁盘内容保持一致
@@ -101,10 +114,10 @@ final class HistoryStoreTests: XCTestCase {
         store.remove(id: target.id)
         XCTAssertEqual(store.entries.map(\.term), ["ingress"])
         store.flush()
-        XCTAssertEqual(HistoryStore(directory: directory).entries.map(\.term), ["ingress"])
+        XCTAssertEqual(makeStore().entries.map(\.term), ["ingress"])
     }
 
-    /// 删除不存在的 id 不应改动数据，也不应重复落盘
+    /// 删除不存在的 id 不应改动数据
     func test_removeUnknownIdIsNoop() {
         store.add(makeInterpretation("helm"), model: nil)
         store.remove(id: UUID())
@@ -125,62 +138,44 @@ final class HistoryStoreTests: XCTestCase {
         XCTAssertEqual(tsv, "helm\t释义\n")
     }
 
-    // MARK: - 后台写入与损坏恢复
+    // MARK: - 异步提交与损坏恢复
 
     /// 写盘不阻塞调用方：add 返回即可读内存，磁盘内容在 flush 后才保证是最新的
     func test_addDoesNotWaitForDisk() {
         store.add(makeInterpretation("helm"), model: nil)
         XCTAssertEqual(store.entries.map(\.term), ["helm"], "内存立即可见")
         store.flush()
-        XCTAssertEqual(HistoryStore(directory: directory).entries.map(\.term), ["helm"])
+        XCTAssertEqual(makeStore().entries.map(\.term), ["helm"])
     }
 
-    /// 连续写入合并：中间态不必逐次落盘，最终状态必须完整
-    func test_rapidWritesCoalesceToLatestState() {
+    /// 连续写入全部落盘：最终状态完整、顺序与内存一致
+    func test_rapidWritesAllPersist() {
         for index in 0..<50 {
             store.add(makeInterpretation("term-\(index)"), model: nil)
         }
         store.flush()
-        let reloaded = HistoryStore(directory: directory)
+        let reloaded = makeStore()
         XCTAssertEqual(reloaded.entries.count, 50)
         XCTAssertEqual(reloaded.entries.first?.term, "term-49")
         XCTAssertEqual(reloaded.entries.last?.term, "term-0")
     }
 
-    /// 损坏文件：备份原文件 + 给出可见警告，而不是静默清空后被下一次写入覆盖
-    func test_corruptedFileIsBackedUpWithVisibleWarning() throws {
-        let fileURL = directory.appendingPathComponent("history.json")
-        try Data("{ 这不是合法 JSON".utf8).write(to: fileURL)
-
-        let recovered = HistoryStore(directory: directory)
-
-        XCTAssertTrue(recovered.entries.isEmpty)
-        let warning = try XCTUnwrap(recovered.loadWarning, "损坏必须给出可见警告")
-        XCTAssertTrue(warning.contains("备份"))
-
-        let backups = try FileManager.default.contentsOfDirectory(atPath: directory.path)
-            .filter { $0.hasPrefix("history.corrupt-") }
-        let directoryContents = try FileManager.default.contentsOfDirectory(atPath: directory.path)
-        XCTAssertEqual(backups.count, 1, "原文件必须留档，实际目录内容：\(directoryContents)")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path), "损坏文件应被移走，避免下次写入前误判")
-
-        // 备份内容保持原样，仍可人工抢救
-        let backupData = try Data(contentsOf: directory.appendingPathComponent(backups[0]))
-        XCTAssertEqual(String(decoding: backupData, as: UTF8.self), "{ 这不是合法 JSON")
-    }
-
-    /// 正常文件不应产生警告
-    func test_validFileHasNoWarning() {
+    /// 正常库不应产生警告
+    func test_validStoreHasNoWarning() {
         store.add(makeInterpretation("helm"), model: nil)
         store.flush()
-        XCTAssertNil(HistoryStore(directory: directory).loadWarning)
+        let reloaded = makeStore()
+        XCTAssertNil(reloaded.loadWarning)
+        XCTAssertEqual(reloaded.state, .ready)
     }
 
-    /// 空文件（0 字节）视为「还没有历史」，不算损坏
-    func test_emptyFileIsNotCorruption() throws {
-        try Data().write(to: directory.appendingPathComponent("history.json"))
-        let reloaded = HistoryStore(directory: directory)
-        XCTAssertTrue(reloaded.entries.isEmpty)
-        XCTAssertNil(reloaded.loadWarning)
+    /// 占用统计：记录数与磁盘占用来自数据库与文件，不虚报
+    func test_storageStatsReflectDisk() {
+        store.add(makeInterpretation("helm"), model: nil)
+        store.flush()
+        let stats = store.storageStats()
+        XCTAssertEqual(stats.recordCount, 1)
+        XCTAssertGreaterThan(stats.databaseBytes, 0)
+        XCTAssertTrue(stats.legacyJSONPresent == false)
     }
 }

@@ -17,8 +17,14 @@ struct HistoryView: View {
     @State private var favoritesOnly = false
     /// 清空确认弹窗开关
     @State private var pendingClear = false
-    /// 启动加载时的问题（如历史文件损坏已备份）：顶部常驻提示，避免用户以为数据莫名消失
+    /// 启动加载时的问题（如旧文件损坏、写入失败）：顶部常驻提示，避免用户以为数据莫名消失
     @State private var loadWarning: String?
+    /// 历史库不可用 / 待迁移 / 旧文件损坏：显示处理入口（重试、从空历史开始）
+    @State private var blockedReason: HistoryBlockReason?
+    /// 历史是否仍在后台准备（首次升级导入旧数据）
+    @State private var isPreparingHistory = true
+    /// 「从空历史开始」二次确认
+    @State private var confirmsStartEmpty = false
     /// 底部状态栏的短提示（导出 / 删除 / 清空结果）
     @State private var notice: String?
     /// 提示是否为失败态（决定文字颜色）
@@ -50,6 +56,11 @@ struct HistoryView: View {
         .onReceive(NotificationCenter.default.publisher(for: HistoryStore.didChangeNotification)) { _ in
             reload()
         }
+        .onReceive(NotificationCenter.default.publisher(for: HistoryStore.didFailToSaveNotification)) { _ in
+            if let message = HistoryStore.shared.lastSaveError {
+                showNotice(message, isError: true)
+            }
+        }
         .onDisappear { noticeTask?.cancel() }
     }
 
@@ -58,7 +69,9 @@ struct HistoryView: View {
     /// 侧栏：搜索框 + 来源胶囊 + 分组列表 + 底部计数
     private var sidebar: some View {
         VStack(spacing: 0) {
-            if let loadWarning {
+            if let blockedReason {
+                blockedBanner(blockedReason)
+            } else if let loadWarning {
                 warningBanner(loadWarning)
             }
             VStack(spacing: 8) {
@@ -75,7 +88,14 @@ struct HistoryView: View {
             Divider()
 
             if visibleEntries.isEmpty {
-                emptySidebar
+                if blockedReason != nil {
+                    // 历史不可用时下面已经给出处理入口，不再重复「还没有查询记录」
+                    Spacer()
+                } else if isPreparingHistory {
+                    preparingHistory
+                } else {
+                    emptySidebar
+                }
             } else {
                 entryList
             }
@@ -107,6 +127,53 @@ struct HistoryView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(Color.orange.opacity(0.12))
+    }
+
+    /// 历史库不可用时的处理面板：说明原因，并给出「重试 / 从空历史开始」入口。
+    /// 后台准备期间（首次升级导入）单独显示 preparingHistory，不误报成空历史。
+    private func blockedBanner(_ reason: HistoryBlockReason) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("历史记录暂不可用", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.orange)
+            Text(reason.message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                Button("重试") { HistoryStore.shared.retryPreparation() }
+                    .controlSize(.small)
+                    .disabled(isPreparingHistory)
+                if case .corruptLegacyJSON = reason {
+                    Button("从空历史开始…", role: .destructive) { confirmsStartEmpty = true }
+                        .controlSize(.small)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.orange.opacity(0.12))
+        .confirmationDialog("从空历史开始？", isPresented: $confirmsStartEmpty) {
+            Button("从空历史开始", role: .destructive) {
+                HistoryStore.shared.startEmptyAfterCorruptLegacy()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("旧的 history.json 无法解析。原文件会备份为 history.corrupt-…json（可人工抢救），之后不再尝试导入。")
+        }
+    }
+
+    /// 首次升级导入旧历史期间的占位，避免被误认为「没有记录」
+    private var preparingHistory: some View {
+        VStack(spacing: 8) {
+            Spacer()
+            ProgressView().controlSize(.small)
+            Text("正在准备历史记录…")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
     }
 
     /// 自绘搜索框：系统 .searchable 依赖工具栏，这里在侧栏内固定展示更稳定
@@ -457,6 +524,11 @@ struct HistoryView: View {
     private func reload() {
         entries = HistoryStore.shared.entries
         loadWarning = HistoryStore.shared.loadWarning
+        blockedReason = {
+            if case .blocked(let reason) = HistoryStore.shared.state { return reason }
+            return nil
+        }()
+        isPreparingHistory = HistoryStore.shared.state == .loading
         if let selection, visibleEntries.contains(where: { $0.id == selection }) {
             return
         }

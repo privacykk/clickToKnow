@@ -10,7 +10,7 @@ macOS 全局划词释义工具：选中文字 → 按快捷键 → 就地弹出*
 | 单元测试 | `swift test` | 见下文「测试」 |
 | 打包分发 | `./Scripts/package.sh` | `dist/ClickToKnow-<版本>.dmg` 和 `dist/ClickToKnow-<版本>.zip`，详见下文「打包与分发」 |
 | 固定签名身份（一次性） | `./Scripts/make_signing_cert.sh` | 生成「ClickToKnow Local Signing」证书，覆盖安装不再丢辅助功能授权 |
-| 卸载清理 | `./Scripts/uninstall.sh`（`--dry-run` 预演 / `--purge` 连生词本与 `.env` 一起删） | 移除 .app、配置 plist、全部配置的钥匙串密钥；默认保留生词本，详见下文「卸载」 |
+| 卸载清理 | `./Scripts/uninstall.sh`（`--dry-run` 预演 / `--purge` 连历史数据库与 `.env` 一起删） | 移除 .app、配置 plist、全部配置的钥匙串密钥；默认保留历史数据库与备份，详见下文「卸载」 |
 
 ## 功能
 
@@ -27,11 +27,15 @@ macOS 全局划词释义工具：选中文字 → 按快捷键 → 就地弹出*
 - **AX 直读为主路径**：不碰剪贴板、对禁复制应用有效，弹窗贴选区（而非鼠标）展示，选区前后文随查询发送（LLM 领域判断更准）；未实现 AX 的应用自动回退模拟 ⌘C
 - **SSE 流式输出**：四种协议均支持边收边显示。代理仅支持整包响应时，可在「大模型」关闭流式输出
 - **进程内查询缓存**：同一词条（含供应商 + 模型指纹）重复查询零延迟零费用
-- **历史记录（生词本）**：查询自动落盘（上限 500 条），菜单栏「历史记录…」按日分组浏览，支持关键词搜索、来源筛选、单条删除与清空确认，可按当前筛选导出 CSV / Anki TSV
-- **隐私设置**：查询可切换为仅用系统词典，也可关闭读取及发送选区前后文、停止记录历史或清空历史。可按 Bundle ID 添加禁止取词的应用，内置密码管理应用始终受保护
+- **历史记录（生词本）**：查询自动落盘到本机 **SQLite**（`history.sqlite3`，默认保留 500 条，可选 100 / 500 / 1,000 / 5,000），菜单栏「历史记录…」按日分组浏览，支持关键词搜索、来源筛选、单条删除与清空确认，可按当前筛选导出 CSV / Anki TSV。旧版 `history.json` 在升级时一次性导入并归档，不丢记录
+- **历史复用**：内存缓存未命中时，条件完全一致（词条、前后文、来源、端点、模型、释义模板）的本地历史释义直接显示并标注「来自本地历史」，不再请求网络；「重新查询」绕过两层缓存。删除 / 清空历史会同时让对应内存缓存失效
+- **存储可见可控**：隐私设置显示历史数据库位置、记录数、实际占用与备份占用，可「在 Finder 中显示」；区分「清空记录」与「回收磁盘空间」（`VACUUM`），可单独清理迁移备份与损坏备份
+- **隐私设置**：查询可切换为仅用系统词典，也可关闭读取及发送选区前后文、停止记录历史或清空历史（可只清非收藏、调整保留条数、回收磁盘空间）。禁止取词的应用支持**直接选择 .app**（读显示名与 Bundle ID，列表优先显示可读名称），也可手填 Bundle ID；内置密码管理应用始终受保护
 - 菜单栏**暂停取词**开关（投屏 / 演示 / 输密码场景）与**开机自启**开关（SMAppService，打包为 .app 后生效）
 - 分级日志（os.Logger，`log show --predicate 'subsystem == "ClickToKnow"'`）与**诊断信息导出**（状态页，脱敏）
-- 选词抓取后自动恢复用户原有剪贴板（⌘C 兜底路径）；安全输入态（密码框聚焦）主动跳过抓取；等待期间前台应用切换则取消本次抓取，不去复制别处的内容
+- 选词抓取后自动恢复用户原有剪贴板（⌘C 兜底路径）；安全输入态（密码框聚焦）主动跳过抓取；**交付前再复核一次**：等待期间切换应用、进入安全输入或把目标加入禁止名单，本次结果都不交付
+- 剪贴板兜底期间用户自己按了 ⌘C：区分合成复制与手动复制，不把用户刚复制的内容当选词查询，也不覆盖它
+- 加载态不排自动关闭倒计时：慢速流式查询（30–40 秒持续返回增量）不会被 25 秒兜底关掉并取消请求；手动关闭仍然立即取消
 
 ## 运行
 
@@ -97,13 +101,13 @@ swift test
 
 ### 卸载
 
-直接把 `.app` 拖入废纸篓会**留下残留**：配置 plist、钥匙串里的 API Key（**每个 API 配置一条**，不是一条）、生词本 `history.json`、辅助功能授权条目都不会随之删除。完整卸载方式二选一：
+直接把 `.app` 拖入废纸篓会**留下残留**：配置 plist、钥匙串里的 API Key（**每个 API 配置一条**，不是一条）、历史数据库 `history.sqlite3` 及其备份、辅助功能授权条目都不会随之删除。完整卸载方式二选一：
 
 **一键脚本**（仓库内）：
 
 ```bash
-./Scripts/uninstall.sh           # 默认：卸载应用与凭据，保留生词本与 ~/.clicktoknow
-./Scripts/uninstall.sh --purge   # 彻底卸载：连生词本 history.json 与 ~/.clicktoknow 一起删
+./Scripts/uninstall.sh           # 默认：卸载应用与凭据，保留历史数据库与 ~/.clicktoknow
+./Scripts/uninstall.sh --purge   # 彻底卸载：连历史数据库 / 备份与 ~/.clicktoknow 一起删
 ./Scripts/uninstall.sh --dry-run # 预演：逐条打印将执行的操作（含钥匙串目标账号），零副作用
 ```
 
@@ -116,7 +120,7 @@ swift test
 3. 清 UserDefaults domain（`ClickToKnow` 与 `com.clicktoknow.app`）
 4. 移除传统 `~/Library/LaunchAgents` 里的同名条目（本应用用 `SMAppService`，通常没有）
 5. 删除 `.app`
-6. 默认**保留** `~/Library/Application Support/ClickToKnow/history.json`（生词本）与 `~/.clicktoknow`（`.env`）；`--purge` 才删
+6. 默认**保留** `~/Library/Application Support/ClickToKnow`（`history.sqlite3` 历史数据库、`history.migrated.json` 迁移备份、`history.corrupt-*.json` 损坏备份）与 `~/.clicktoknow`（`.env`）；`--purge` 才会删除整个数据目录
 
 `--dry-run` 只打印：不会调用 `security` 写操作、不会 `defaults delete`、不会 `rm`。
 
@@ -136,7 +140,7 @@ security delete-generic-password -s ClickToKnow -a apiKey
 defaults delete ClickToKnow            # 配置 suite（快捷键/凭据归属/API 配置列表）
 defaults delete com.clicktoknow.app    # 系统自动写入的窗口状态等
 rm -rf /Applications/ClickToKnow.app
-rm -rf ~/Library/Application\ Support/ClickToKnow   # 生词本 history.json（想留就跳过这行）
+rm -rf ~/Library/Application\ Support/ClickToKnow   # 历史数据库 history.sqlite3 与备份（想留就跳过这行）
 rm -rf ~/.clicktoknow                  # 若按 README 创建过 .env
 ```
 
@@ -189,7 +193,7 @@ Sources/ClickToKnow/
 ├── Selection/                  全局快捷键（配置化 + 热重注册）+ AX 直读（异步 + messaging timeout）+ ⌘C 抓词事务（兜底，互斥持有到快照恢复完成）+ 键码翻译
 ├── Interpretation/             系统词典 + 四种 API 协议（流式 / 整包）+ 模型目录拉取 + 连接测试 + 查询缓存
 ├── Config/                     UserDefaults 配置（多 API 配置 + 应用黑名单）/ 钥匙串密钥存储（按配置隔离）/ 供应商预设 / 分级日志（os.Logger）
-├── Status/                     运行时状态聚合（AppStatusModel）+ 辅助功能授权三态与失效识别 + 历史记录持久化（HistoryStore）
+├── Status/                     运行时状态聚合（AppStatusModel）+ 辅助功能授权三态 + 历史存储（HistoryStore / HistoryDatabase / HistoryMigration）
 └── UI/                         NSPanel 结果操作栏 + 共享 Markdown 解析 + SwiftUI 设置页 + 历史记录窗口（搜索 / 收藏 / 筛选 / 导出）
 Packaging/                      Info.plist 模板 + 应用图标（Scripts/make_icon.swift 程序化生成）
 Scripts/                        package.sh 一键打包（默认 universal binary）/ make_signing_cert.sh 本机固定签名身份 / uninstall.sh 卸载清理 / make_icon.swift 图标生成

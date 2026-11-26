@@ -103,6 +103,24 @@ final class AutoCloseSchedulerTests: XCTestCase {
         XCTAssertFalse(fired)
     }
 
+    /// 加载态不限时：不排自动关闭，结果落地后才按阅读时限计时。
+    /// 回归点：旧实现给加载态排了 25s 兜底，慢速流式查询会被提前关掉并取消请求。
+    func test_indefiniteRestartArmsNothingUntilResultLands() {
+        scheduler.restart(duration: nil)
+        XCTAssertTrue(timer.scheduled.isEmpty, "加载态不得排自动关闭")
+        XCTAssertNil(scheduler.duration)
+
+        scheduler.hoverChanged(true)
+        scheduler.hoverChanged(false)
+        XCTAssertTrue(timer.scheduled.isEmpty, "不限时展示移开鼠标后也不应开始计时")
+
+        scheduler.restart(duration: 15)
+        XCTAssertEqual(timer.scheduled.count, 1)
+        XCTAssertEqual(timer.scheduled.first?.delay, 15)
+        timer.fire()
+        XCTAssertTrue(fired)
+    }
+
     func test_pinSurvivesMouseExitAndUnpinRestartsCountdown() {
         scheduler.restart(duration: 15)
         scheduler.setPinned(true)

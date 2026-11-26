@@ -13,6 +13,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// LLM 配置变更监听（清空查询缓存，防旧释义串味）
     private var configObserver: NSObjectProtocol?
     private var privacyObserver: NSObjectProtocol?
+    /// 历史记录删除 / 清空 / 裁剪监听（淘汰对应内存缓存，关闭正在展示的历史复用结果）
+    private var historyRemovalObserver: NSObjectProtocol?
+    /// 当前弹窗内容来自哪条历史记录（该记录被删除时要立刻关闭，不能继续展示已删除的释义）
+    private var currentReuseSourceID: HistoryEntry.ID?
 
     /// 查询代际：新查询、关闭弹窗、暂停、展示失败提示都会让旧会话失效，
     /// 过期响应（增量/成功/失败）在落到 UI 前统一校验，不再只靠「成功才换代」。
@@ -32,6 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 整理旧配置和密钥归属。迁移密钥等到用户在设置页主动操作。
         AppConfig.shared.migrateLegacyConfigIfNeeded()
+        // 启动即在后台打开历史库并完成旧 JSON 迁移：别等用户第一次打开历史窗口时才做
+        _ = HistoryStore.shared
         statusBarController = StatusBarController(statusModel: statusModel)
         popover = ResultPopover()
         setupSelectionMonitor()
@@ -40,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         requestAccessibilityIfNeeded()
         observeHotKeyChanges()
         observeLLMConfigChanges()
+        observeHistoryRemovals()
         // 启动即展示主界面：用户打开应用立刻看到配置与状态，而不是只有一枚菜单栏图标
         statusBarController?.openSettings()
         Log.app.info("LLM 配置：\(AppConfig.shared.hasLLMConfig ? "已就绪" : "未配置（回落到系统词典）")")
@@ -48,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 退出前把后台排队中的历史记录写完（写入是异步合并的，不 flush 会丢掉最后几条）
     func applicationWillTerminate(_ notification: Notification) {
         if let privacyObserver { NotificationCenter.default.removeObserver(privacyObserver) }
+        if let historyRemovalObserver { NotificationCenter.default.removeObserver(historyRemovalObserver) }
         HistoryStore.shared.flush()
     }
 
@@ -90,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func invalidateCurrentQuery() {
         currentRequest?.cancel()
         currentRequest = nil
+        currentReuseSourceID = nil
         querySession.invalidate()
     }
 
@@ -116,6 +125,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.popover?.close()
                 self?.cache.removeAll()
                 self?.statusModel.refresh()
+            }
+        }
+    }
+
+    /// 历史记录被删除 / 清空 / 自动裁剪：淘汰对应内存缓存；若弹窗正展示那条历史，立即关闭。
+    /// 不做这一步，用户删掉记录后仍能命中旧结果，看起来像删除没生效。
+    private func observeHistoryRemovals() {
+        historyRemovalObserver = NotificationCenter.default.addObserver(
+            forName: HistoryStore.didRemoveHistoryNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let fingerprints = Set(notification.userInfo?["fingerprints"] as? [String] ?? [])
+                self.cache.removeEntries(matchingFingerprints: fingerprints)
+                let ids = Set(notification.userInfo?["ids"] as? [HistoryEntry.ID] ?? [])
+                if let source = self.currentReuseSourceID, ids.contains(source) {
+                    self.invalidateCurrentQuery()
+                    self.popover?.close()
+                }
             }
         }
     }
@@ -173,6 +201,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             等待取词期间前台应用已切换。为避免复制到其他应用的内容，本次抓取已取消；请重新选中文字后再按快捷键。
             """
+        case .clipboardChangedExternally:
+            message = """
+            **已取消本次取词**
+
+            等待取词期间你复制了新的内容。为免把这份内容误当作选词发出去，本次取词已取消，剪贴板保持你的最新内容。
+            """
         }
         popover?.show(MarkdownRenderer.render(message), at: location, autoCloseAfter: 8)
     }
@@ -216,19 +250,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             profileID: snapshot.profileID,
             explanationStyle: snapshot.explanationStyle
         )
+        let fingerprint = QueryFingerprint.make(from: cacheKey)
         let retry: () -> Void = { [weak self] in
+            // 「重新查询」绕过两层缓存：内存缓存与本地历史都不看一眼，直接请求
             self?.handleSelectedText(text, at: location, context: requestContext, bypassCache: true)
         }
+        currentReuseSourceID = nil
         if !bypassCache, let cached = cache.get(cacheKey) {
             guard querySession.isCurrent(requestID) else { return }
-            let historyID = recordHistory(cached, snapshot: snapshot)
+            let historyID = recordHistory(cached, snapshot: snapshot, fingerprint: fingerprint)
             show(cached, at: location, historyID: historyID, retry: retry)
+            return
+        }
+        // 内存缓存未命中：看本地历史里是否有条件完全一致的释义（关闭保存历史时一并停用）
+        if !bypassCache,
+           AppConfig.shared.recordsQueryHistory,
+           AppConfig.shared.reusesQueryHistory,
+           let entry = HistoryStore.shared.reusableEntry(fingerprint: fingerprint),
+           let source = Interpretation.Source(rawValue: entry.source) {
+            guard querySession.isCurrent(requestID) else { return }
+            currentReuseSourceID = entry.id
+            showReused(entry, interpretation: Interpretation(term: entry.term, content: entry.content, source: source),
+                       at: location, retry: retry)
             return
         }
 
         // 立即反馈：否则非流式路径要数秒，期间界面像卡死。
-        // 展示时限 25s > 请求超时 20s，保证超时错误能顶替 loading 出现
-        popover?.show(MarkdownRenderer.render("查询中…"), at: location, autoCloseAfter: 25)
+        // 加载态不排自动关闭：流式增量不会刷新倒计时，而网络超时是 45s（单请求 20s），
+        // 25s 的兜底会在慢请求上把弹窗关掉，连带取消在途查询。
+        // 查询期间的时间上限交给网络层；结果落地后由 show 重新开始阅读倒计时。
+        popover?.show(MarkdownRenderer.render("查询中…"), at: location, autoCloseAfter: nil)
 
         let provider = ProviderFactory.make(snapshot)
         currentRequest = Task { [weak self] in
@@ -252,7 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 guard let self, self.querySession.isCurrent(requestID) else { return } // 已被新查询/关闭取代
                 self.cache.put(cacheKey, result)
-                let historyID = self.recordHistory(result, snapshot: snapshot)
+                let historyID = self.recordHistory(result, snapshot: snapshot, fingerprint: fingerprint)
                 self.show(result, at: location, historyID: historyID, retry: retry)
             } catch is CancellationError {
                 // 弹窗已关闭或已被新查询取代：静默丢弃，不展示错误
@@ -272,9 +323,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// 展示成功释义（Markdown 渲染后入弹窗，自动关闭沿用上次时限）
-    private func recordHistory(_ result: Interpretation, snapshot: QuerySnapshot) -> HistoryEntry.ID? {
+    private func recordHistory(
+        _ result: Interpretation, snapshot: QuerySnapshot, fingerprint: String
+    ) -> HistoryEntry.ID? {
         guard AppConfig.shared.recordsQueryHistory else { return nil }
-        return HistoryStore.shared.add(result, model: snapshot.historyModel)
+        return HistoryStore.shared.add(result, model: snapshot.historyModel, fingerprint: fingerprint)
+    }
+
+    /// 展示来自本地历史的释义：标注来源与时间，不再追加重复记录。
+    /// 「重试」按钮走 bypassCache，会真正重新查询。
+    private func showReused(
+        _ entry: HistoryEntry, interpretation: Interpretation, at location: NSPoint, retry: @escaping () -> Void
+    ) {
+        let stamp = entry.date.formatted(date: .abbreviated, time: .shortened)
+        let body = "_来自本地历史（\(stamp)）_\n\n" + interpretation.content
+        popover?.show(
+            MarkdownRenderer.render(body), at: location, result: interpretation, retry: retry,
+            toggleFavorite: { HistoryStore.shared.toggleFavorite(id: entry.id) }
+        )
     }
 
     private func show(

@@ -15,6 +15,8 @@ enum SelectionFailure {
     case timeout
     /// 等待期间前台应用已切换：宁可失败，也不去读别处的内容
     case targetChanged
+    /// 等待复制期间用户自己按了 ⌘C：内容来源无法判定，既不当选词查询，也不覆盖用户的新内容
+    case clipboardChangedExternally
 }
 
 /// 监听全局快捷键，抓取前台应用当前选中的文本。
@@ -41,8 +43,11 @@ final class SelectionMonitor {
         var frontmostPID: () -> pid_t?
         var blacklistedBundleIDs: () -> Set<String>
         var mouseLocation: () -> NSPoint
-        /// 向前台应用发 ⌘C
+        /// 向前台应用发 ⌘C（带合成标记，便于把自己的投递和用户手动复制区分开）
         var simulateCopy: () -> Void
+        /// 监听事务期间用户真实按下的 ⌘C（合成事件已过滤）；返回停止监听的闭包。
+        /// 用户手动复制与兜底复制都会改剪贴板，只有键事件能说明「这份内容不是选词」。
+        var observeUserCopyKeyPress: (@escaping () -> Void) -> () -> Void
 
         static let live = Environment(
             isAccessibilityTrusted: { AXIsProcessTrusted() },
@@ -51,14 +56,17 @@ final class SelectionMonitor {
             frontmostPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
             blacklistedBundleIDs: { AppConfig.shared.blacklistedBundleIDs },
             mouseLocation: { NSEvent.mouseLocation },
-            simulateCopy: {
-                let source = CGEventSource(stateID: .hidSystemState)
-                let down = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_C), keyDown: true)
-                down?.flags = .maskCommand
-                down?.post(tap: .cghidEventTap)
-                let up = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_C), keyDown: false)
-                up?.flags = .maskCommand
-                up?.post(tap: .cghidEventTap)
+            simulateCopy: { SyntheticCopy.postCommandC() },
+            observeUserCopyKeyPress: { handler in
+                let monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
+                    guard event.keyCode == UInt16(kVK_ANSI_C),
+                          event.modifierFlags.contains(.command),
+                          !SyntheticCopy.isSynthetic(event) else { return }
+                    handler()
+                }
+                return {
+                    if let monitor { NSEvent.removeMonitor(monitor) }
+                }
             }
         )
     }
@@ -89,6 +97,11 @@ final class SelectionMonitor {
 
     /// 取词代际：目标切换 / 暂停让旧结果作废（AX IPC 无法真正中断，只能丢弃结果）
     private var readToken = 0
+
+    /// 事务期间用户是否自己按了 ⌘C（内容归属无法判定 → 不查询、不覆盖）
+    private var userCopiedDuringTransaction = false
+    /// 用户 ⌘C 监听的注销句柄（事务结束即移除，避免常驻全局监听）
+    private var stopObservingUserCopy: (() -> Void)?
 
     /// 轮询超时预算（复制响应慢的应用兜底上限）
     static let copyTimeout: TimeInterval = 0.5
@@ -197,6 +210,12 @@ final class SelectionMonitor {
             return
         }
         if let selection, !selection.text.isEmpty {
+            // 交付前复核：AX 等待期间用户可能切走应用、点了密码框，或刚把目标加进禁止名单。
+            // 此前只在「进入兜底」前复核，直读成功这条路径会把结果原样交出去。
+            guard revalidate(target: target, mouse: mouse) else {
+                finish()
+                return
+            }
             let anchor = selection.rect.map { NSPoint(x: $0.minX, y: $0.maxY) } ?? mouse
             Log.selection.debug("AX 直读成功：\(selection.text.count) 字符")
             finish()
@@ -209,7 +228,7 @@ final class SelectionMonitor {
             finish()
             return
         }
-        beginClipboardTransaction(mouse: mouse, token: token)
+        beginClipboardTransaction(mouse: mouse, target: target, token: token)
     }
 
     /// 前置检查：返回本次取词目标；不满足条件时直接回调失败并返回 nil
@@ -238,79 +257,116 @@ final class SelectionMonitor {
     /// 兜底前复核：目标应用未变、仍非安全输入、仍非黑名单
     private func revalidate(target: Target, mouse: NSPoint) -> Bool {
         if environment.isSecureInputEnabled() {
-            Log.selection.info("等待 AX 期间进入安全输入态，取消复制兜底")
+            Log.selection.info("等待取词期间进入安全输入态，取消本次取词")
             onFailure(.secureInputActive, mouse)
             return false
         }
         let bundleID = environment.frontmostBundleID()
         if let bundleID, environment.blacklistedBundleIDs().contains(bundleID) {
-            Log.selection.info("等待 AX 期间前台应用切到黑名单应用 \(bundleID)，取消复制兜底")
+            Log.selection.info("等待取词期间前台应用切到黑名单应用 \(bundleID)，取消本次取词")
             onFailure(.blacklistedApp, mouse)
             return false
         }
         if let pid = target.pid, environment.frontmostPID() != pid {
-            Log.selection.info("等待 AX 期间前台应用已切换，取消复制兜底（避免复制到别处的内容）")
+            Log.selection.info("等待取词期间前台应用已切换，取消本次取词（避免取到别处的内容）")
             onFailure(.targetChanged, mouse)
             return false
         }
         return true
     }
 
-    /// 剪贴板兜底事务开始：快照 → 模拟 ⌘C → 轮询
-    private func beginClipboardTransaction(mouse: NSPoint, token: Int) {
+    /// 剪贴板兜底事务开始：快照 → 监听用户 ⌘C → 模拟复制 → 轮询
+    private func beginClipboardTransaction(mouse: NSPoint, target: Target, token: Int) {
         let initialCount = pasteboard.saveSnapshot()
+        userCopiedDuringTransaction = false
+        stopObservingUserCopy = environment.observeUserCopyKeyPress { [weak self] in
+            // 事务期间用户自己按了 ⌘C：剪贴板里的内容可能来自他而不是选区
+            self?.userCopiedDuringTransaction = true
+        }
         environment.simulateCopy()
         pollRead(
             initialCount: initialCount,
             deadline: now().addingTimeInterval(Self.copyTimeout),
             mouse: mouse,
-            token: token
+            token: token,
+            target: target
         )
     }
 
-    /// 轮询等待复制生效（20ms 间隔，0.5s 截止）：changeCount 变化即读取并条件恢复
-    private func pollRead(initialCount: Int, deadline: Date, mouse: NSPoint, token: Int) {
+    /// 轮询等待复制生效（20ms 间隔，0.5s 截止）：changeCount 变化即读取、复核并条件恢复
+    private func pollRead(initialCount: Int, deadline: Date, mouse: NSPoint, token: Int, target: Target) {
         // 事务中途被暂停/新一轮取词取代：仍要把快照恢复回去，但不得再交付结果
         guard token == readToken else {
             Log.selection.debug("取词事务已被取代，恢复剪贴板快照后放弃本次结果")
-            pasteboard.restoreSnapshot(readChangeCount: pasteboard.changeCount) { [weak self] _ in
-                self?.finish()
+            restoreSnapshotAndFinish()
+            return
+        }
+        guard pasteboard.changeCount != initialCount else {
+            if now() < deadline {
+                scheduler.schedule(after: Self.pollInterval) { [weak self] in
+                    self?.pollRead(
+                        initialCount: initialCount, deadline: deadline,
+                        mouse: mouse, token: token, target: target
+                    )
+                }
+            } else {
+                Log.selection.debug("未抓取到文本（超时，应用复制响应慢或禁止复制）")
+                restoreSnapshotAndFinish()
+                onFailure(.timeout, mouse)
             }
             return
         }
-        if pasteboard.changeCount != initialCount {
-            let text = pasteboard.readText()?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let readCount = pasteboard.changeCount
-            // 恢复完成（或确认不恢复）后才释放互斥：此前 finish() 在这里就放锁，
-            // 第二次查询能赶在恢复前保存快照，把本次复制的词条当成「用户原始剪贴板」
-            guard !text.isEmpty else {
-                Log.selection.debug("未抓取到文本（空选择）")
-                pasteboard.restoreSnapshot(readChangeCount: readCount) { [weak self] _ in
-                    self?.finish()
-                }
-                onFailure(.emptySelection, mouse)
-                return
-            }
-            pasteboard.restoreSnapshot(readChangeCount: readCount) { [weak self] _ in
-                self?.finish()
-            }
-            onSelected(text, mouse, nil) // ⌘C 兜底路径拿不到选区前后文
-        } else if now() < deadline {
-            scheduler.schedule(after: Self.pollInterval) { [weak self] in
-                self?.pollRead(initialCount: initialCount, deadline: deadline, mouse: mouse, token: token)
-            }
-        } else {
-            pasteboard.restoreSnapshot(readChangeCount: pasteboard.changeCount) { [weak self] _ in
-                self?.finish()
-            }
-            Log.selection.debug("未抓取到文本（超时，应用复制响应慢或禁止复制）")
-            onFailure(.timeout, mouse)
+
+        let readCount = pasteboard.changeCount
+        let text = pasteboard.readText()?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        // 用户手动复制过，或读到内容后剪贴板又被写了一次：内容归属无法判定。
+        // 此时既不能拿它当选词查询（可能把用户刚复制的东西发出去），
+        // 也不能恢复旧快照（会覆盖用户最新复制的内容），只能放弃本次结果。
+        if userCopiedDuringTransaction || pasteboard.changeCount != readCount {
+            Log.selection.info("剪贴板内容已由用户更新，放弃本次结果且不覆盖用户内容")
+            abandonSnapshotAndFinish()
+            onFailure(.clipboardChangedExternally, mouse)
+            return
         }
+        guard !text.isEmpty else {
+            Log.selection.debug("未抓取到文本（空选择）")
+            restoreSnapshotAndFinish()
+            onFailure(.emptySelection, mouse)
+            return
+        }
+        // 交付前复核：复制期间前台应用可能已切换、进入安全输入或被加入禁止名单
+        guard revalidate(target: target, mouse: mouse) else {
+            restoreSnapshotAndFinish()
+            return
+        }
+        // 恢复完成（或确认不恢复）后才释放互斥：此前 finish() 在这里就放锁，
+        // 第二次查询能赶在恢复前保存快照，把本次复制的词条当成「用户原始剪贴板」
+        pasteboard.restoreSnapshot(readChangeCount: readCount) { [weak self] _ in
+            self?.finish()
+        }
+        onSelected(text, mouse, nil) // ⌘C 兜底路径拿不到选区前后文
+    }
+
+    /// 恢复快照后结束事务（恢复是异步的，互斥在恢复回调里释放）
+    private func restoreSnapshotAndFinish() {
+        pasteboard.restoreSnapshot(readChangeCount: pasteboard.changeCount) { [weak self] _ in
+            self?.finish()
+        }
+    }
+
+    /// 放弃快照并结束事务：剪贴板保持用户最新内容，不被旧快照覆盖
+    private func abandonSnapshotAndFinish() {
+        pasteboard.abandonSnapshot()
+        finish()
     }
 
     /// 结束一次抓取（释放事务互斥）：仅在 AX 结果作废、剪贴板恢复完成等终态调用
     private func finish() {
+        stopObservingUserCopy?()
+        stopObservingUserCopy = nil
+        userCopiedDuringTransaction = false
         isProcessing = false
     }
 

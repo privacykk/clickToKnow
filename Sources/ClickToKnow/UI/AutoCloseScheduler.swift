@@ -39,7 +39,8 @@ final class AutoCloseScheduler {
     private(set) var isHovering = false
     private(set) var isPinned = false
     private var isActive = false
-    private(set) var duration: TimeInterval
+    /// 当前阅读时限；nil = 不限时（查询加载态：时间上限交给网络层，结果落地前不自动关闭）
+    private(set) var duration: TimeInterval?
 
     /// 倒计时到点回调（ResultPopover 据此关闭面板）
     var onFire: (() -> Void)?
@@ -50,8 +51,8 @@ final class AutoCloseScheduler {
         self.duration = duration
     }
 
-    /// 开始/重排倒计时（首次展示与内容更新时调用；悬停中不排）
-    func restart(duration: TimeInterval) {
+    /// 开始/重排倒计时；duration 为 nil 时进入「不限时」展示（仅取消旧计时，不排新的）
+    func restart(duration: TimeInterval?) {
         self.duration = duration
         isActive = true
         arm()
@@ -81,7 +82,7 @@ final class AutoCloseScheduler {
     /// 排定倒计时；悬停期间一律不排——「悬停暂停」的全部实现就在这里
     private func arm() {
         timer.cancel()
-        guard isActive, !isHovering, !isPinned else { return }
+        guard isActive, !isHovering, !isPinned, let duration else { return }
         timer.schedule(after: duration) { [weak self] in
             self?.onFire?()
         }
