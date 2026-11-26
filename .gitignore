@@ -1,6 +1,6 @@
 # macOS
 .DS_Store
-
+docs/
 # Swift 构建产物
 .build/
 .swiftpm/
